@@ -436,6 +436,9 @@ typedef struct _go_hchan_t {
 	go_runtime_mutex_t lock;
 } go_hchan_t;
 
+typedef struct _go_sync_waitgroup_t {
+	uint32_t state1[3];
+} go_sync_waitgroup_t;
 
 
 #endif // _GO_DEFINES_H_

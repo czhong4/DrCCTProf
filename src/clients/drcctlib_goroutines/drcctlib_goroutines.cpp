@@ -47,6 +47,13 @@ typedef struct _mutex_ctxt_t{
     int64_t cur_unlock_slow_goid;
 } mutex_ctxt_t;
 
+typedef struct _waitgroup_ctxt_t {
+    app_pc addr;
+    context_handle_t create_context;
+    int64_t counter;
+    context_handle_t wait_context;
+} waitgroup_ctxt_t;
+
 typedef struct _mem_ref_t {
     app_pc addr;
     uint64_t state;
@@ -123,6 +130,7 @@ static std::vector<std::string> *blacklist;
 static go_moduledata_t *go_firstmoduledata;
 
 static vector<mutex_ctxt_t> *mutex_ctxt_list;
+static vector<waitgroup_ctxt_t> *wg_ctxt_list;
 static unordered_map<int64_t, vector<pair<bool, context_handle_t>>> *lock_records;
 static unordered_map<int64_t, vector<lock_record_t>> *test_lock_records;
 static unordered_map<int64_t, vector<chan_op_record_t>> *chan_op_records;
@@ -134,7 +142,7 @@ CheckLockState(void *drcontext, int64_t cur_goid, context_handle_t cur_ctxt_hndl
 {
     app_pc addr = ref->addr;
     // DRCCTLIB_PRINTF("addr %p", ref->addr);
-    for (size_t i = 0; i < (*mutex_ctxt_list).size(); i++) {
+    for (size_t i = 0; i < mutex_ctxt_list->size(); i++) {
         if (addr == (*mutex_ctxt_list)[i].state_addr && cur_goid != (*mutex_ctxt_list)[i].cur_unlock_slow_goid) {
             (*lock_records)[cur_goid].emplace_back(1, (*mutex_ctxt_list)[i].create_context);
             context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
@@ -353,6 +361,11 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
         mutex_ctxt_t mutxt_ctxt = {(app_pc)(&(ret_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
         DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
         mutex_ctxt_list->push_back(mutxt_ctxt);
+    } else if (strcmp(type_str.c_str(), "sync.WaitGroup") == 0) {
+        go_sync_waitgroup_t* ret_ptr = (go_sync_waitgroup_t*) dgw_get_go_func_retaddr(wrapcxt, 1, 0);
+        waitgroup_ctxt_t waitgroup_ctxt = {(app_pc) ret_ptr, cur_context, 0, 0};
+        wg_ctxt_list->push_back(waitgroup_ctxt);
+        DRCCTLIB_PRINTF("wg_ctxt %p %d", ret_ptr, waitgroup_ctxt.create_context);
     } else {
         void* ret_ptr = NULL;
         uint64_t offset = 0;
@@ -372,6 +385,17 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
                     mutex_ctxt_t mutxt_ctxt = {(app_pc)(&(mutex_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
                     DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
                     mutex_ctxt_list->push_back(mutxt_ctxt);
+                } else if (strcmp(field_type_str.c_str(), "sync.WaitGroup") == 0) {
+                    if (!ret_ptr) {
+                        ret_ptr = (void*)dgw_get_go_func_retaddr(wrapcxt, 1, 0);
+                        if (!ret_ptr) {
+                            continue;
+                        }
+                    }
+                    go_sync_waitgroup_t* wg_ptr = (go_sync_waitgroup_t*) ((uint64_t)ret_ptr + offset);
+                    waitgroup_ctxt_t waitgroup_ctxt = {(app_pc) wg_ptr, cur_context, 0, 0};
+                    wg_ctxt_list->push_back(waitgroup_ctxt);
+                    DRCCTLIB_PRINTF("wg_ctxt %p %d", ret_ptr, waitgroup_ctxt.create_context);
                 }
             }
             offset += (uint64_t)field_type->size;
@@ -461,6 +485,35 @@ WrapBeforeRTClosechan(void *wrapcxt, void **user_data)
     (*chan_op_records)[cur_goid].emplace_back(cur_goid, 0, (app_pc) chan_ptr, cur_context);
     (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, 0, (app_pc) chan_ptr, cur_context);
     DRCCTLIB_PRINTF("Close channel: %p, context: %ld\n", chan_ptr, cur_context);
+}
+
+static void
+WrapBeforeSyncAdd(void *wrapcxt, void **user_data)
+{
+    go_sync_waitgroup_t *wg_ptr = (go_sync_waitgroup_t*) dgw_get_go_func_arg(wrapcxt, 0);
+    int64_t wg_delta = (int64_t) dgw_get_go_func_arg(wrapcxt, 1);
+    for (size_t i = 0; i < wg_ctxt_list->size(); i++) {
+        if ((app_pc) wg_ptr == (*wg_ctxt_list)[i].addr) {
+            (*wg_ctxt_list)[i].counter += wg_delta;
+            DRCCTLIB_PRINTF("add %ld to waitgroup %p, now %ld", wg_delta, wg_ptr, (*wg_ctxt_list)[i].counter);
+            break;
+        }
+    }
+}
+
+static void
+WrapBeforeSyncWait(void *wrapcxt, void **user_data)
+{
+    void *drcontext = dr_get_current_drcontext();
+    context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
+    go_sync_waitgroup_t *wg_ptr = (go_sync_waitgroup_t*) dgw_get_go_func_arg(wrapcxt, 0);
+    for (size_t i = 0; i < wg_ctxt_list->size(); i++) {
+        if ((app_pc) wg_ptr == (*wg_ctxt_list)[i].addr) {
+            (*wg_ctxt_list)[i].wait_context = cur_context;
+            DRCCTLIB_PRINTF("%p is waiting at %d", wg_ptr, cur_context);
+            break;
+        }
+    }
 }
 
 static go_moduledata_t*
@@ -577,6 +630,14 @@ OnMoudleLoad(void *drcontext, const module_data_t *info,
     if (func_closechan_entry != NULL) {
         drwrap_wrap(func_closechan_entry, WrapBeforeRTClosechan, NULL);
     }
+    app_pc func_sync_add_entry = moudle_get_function_entry(info, "sync.(*WaitGroup).Add", true);
+    if (func_sync_add_entry != NULL) {
+        drwrap_wrap(func_sync_add_entry, WrapBeforeSyncAdd, NULL);
+    }
+    app_pc func_sync_wait_entry = moudle_get_function_entry(info, "sync.(*WaitGroup).Wait", true);
+    if (func_sync_wait_entry != NULL) {
+        drwrap_wrap(func_sync_wait_entry, WrapBeforeSyncWait, NULL);
+    }
     // DRCCTLIB_PRINTF("finish module name %s", modname);
 }
 
@@ -668,6 +729,7 @@ InitBuffer()
 {
     blacklist = new std::vector<std::string>();
     mutex_ctxt_list = new vector<mutex_ctxt_t>();
+    wg_ctxt_list = new vector<waitgroup_ctxt_t>();
     lock_records = new unordered_map<int64_t, vector<pair<bool, context_handle_t>>>();
     test_lock_records = new unordered_map<int64_t, vector<lock_record_t>>();
     chan_op_records = new unordered_map<int64_t, vector<chan_op_record_t>>();
@@ -679,6 +741,7 @@ FreeBuffer()
 {
     delete blacklist;
     delete mutex_ctxt_list;
+    delete wg_ctxt_list;
     delete lock_records;
     delete test_lock_records;
     delete chan_op_records;
@@ -931,6 +994,15 @@ DetectDeadlock()
         } else if (!recvs.empty()) {
             blocked_channel_list.push_back({sends.front().goid, recvs.front().op, 
                                             recvs.front().chan_addr, recvs.front().ctxt});
+        }
+    }
+
+    //detect blocked wait group
+    dr_fprintf(gTraceFile, "Blocked wait groups:\n");
+    for (size_t i = 0; i < wg_ctxt_list->size(); i++) {
+        if ((*wg_ctxt_list)[i].counter > 0) {
+            dr_fprintf(gTraceFile, "%p is blocked at %d\n", 
+                       (*wg_ctxt_list)[i].addr, (*wg_ctxt_list)[i].wait_context);
         }
     }
     
