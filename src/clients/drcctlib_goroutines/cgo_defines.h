@@ -89,8 +89,8 @@ typedef struct _go_name_t{
 } go_name_t;
 
 typedef struct _go_struct_type_t{
-	// size       uintptr
-	go_type_t typ;
+	// rtype
+	go_type_t type;
 	// pkgPath name
 	go_name_t pkgPath;
 	// fields  []structField // sorted by offset
