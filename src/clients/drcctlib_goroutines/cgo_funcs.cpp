@@ -57,7 +57,7 @@ cgo_get_struct_field_type(go_struct_type_t *type, int64_t index)
     if(!field) {
         return NULL;
     }
-    return field->typ;
+    return field->type;
 }
 
 

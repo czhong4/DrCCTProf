@@ -11,6 +11,9 @@
 
 #define  go_iota 0
 
+struct _go_sudog_t;
+struct _go_hchan_t;
+
 typedef enum _go_kind_t: uint8_t {
 	kindBool = 1 + go_iota,
 	kindInt,
@@ -51,26 +54,42 @@ typedef struct _go_slice_t {
 } go_slice_t;
 
 typedef struct _go_type_t{
-    void* size;
-    void* ptrdata;
-    uint32_t hash;
-    uint8_t tflag;
-    uint8_t align;
-    uint8_t fieldAlign;
-    uint8_t kind;
-    void* equal;
-    void* gcdata;
-    int32_t str;
+	// size       uintptr
+	void* size;
+	// ptrdata    uintptr // size of memory prefix holding all pointers
+	void* ptrdata;
+	// hash       uint32
+	uint32_t hash;
+	// tflag      tflag
+	uint8_t tflag;
+	// align      uint8
+	uint8_t align;
+	// fieldAlign uint8
+	uint8_t fieldAlign;
+	// kind       uint8
+	uint8_t kind;
+	// // function for comparing objects of this type
+	// // (ptr to object A, ptr to object B) -> ==?
+	// equal func(unsafe.Pointer, unsafe.Pointer) bool
+	void* equal;
+	// // gcdata stores the GC type data for the garbage collector.
+	// // If the KindGCProg bit is set in kind, gcdata is a GC program.
+	// // Otherwise it is a ptrmask bitmap. See mbitmap.go for details.
+	// gcdata    *byte
+	uint8_t* gcdata;
+	// str       nameOff
+	int32_t str;
+	// ptrToThis typeOff
     int32_t ptrToThis;
 } go_type_t;
 
 typedef struct _go_name_t{
 	// bytes *byte
-	uint8_t *byte;
+	uint8_t* byte;
 } go_name_t;
 
 typedef struct _go_struct_type_t{
-	// rtype
+	// size       uintptr
 	go_type_t typ;
 	// pkgPath name
 	go_name_t pkgPath;
@@ -82,7 +101,7 @@ typedef struct _go_struct_field_t{
 	// name       name
 	go_name_t name;
 	// typ        *_type
-	go_type_t* typ;
+	go_type_t* type;
 	// offsetAnon uintptr
 	void* offsetAnon;
 } go_struct_field_t;
@@ -103,11 +122,11 @@ typedef struct _go_string_t {
 } go_string_t;
 
 typedef struct _go_bitvector_t {
-	int32_t n;
+	int32_t n; // # of bits
 	uint8_t* bytedata;
 } go_bitvector_t;
 
-typedef struct _go_map_t {
+typedef struct _go_hmap_t {
     // count     int // # live cells == size of map.  Must be first (used by len() builtin)
     int64_t count;
 	// flags     uint8
@@ -127,7 +146,7 @@ typedef struct _go_map_t {
     void* nevacuate;
 	// extra *mapextra // optional fields
     void* extra;
-} go_map_t;
+} go_hmap_t;
 
 // typedef struct _go_type_name_t {
 //     uint8_t* data;
@@ -202,7 +221,7 @@ typedef struct _go_moduledata_t {
     go_bitvector_t gcbssmask;
 
 	// typemap map[typeOff]*_type // offset to *_rtype in previous module
-    go_map_t typemap;
+    go_hmap_t typemap;
 	// bad bool // module failed to load and should be ignored
     bool bad;
 	// next *moduledata
@@ -238,7 +257,7 @@ typedef struct _go_gobuf_t {
 	// ctxt unsafe.Pointer
     void* ctxt;
 	// ret  sys.Uintreg
-    void* ret;
+    uint64_t ret;
 	// lr   uintptr
     void* lr;
 	// bp   uintptr // for GOEXPERIMENT=framepointer
@@ -351,7 +370,7 @@ typedef struct _go_g_t {
 	// racectx        uintptr
     void* racectx;
 	// waiting        *sudog         // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
-	void* waiting;
+	struct _go_sudog_t* waiting;
     // cgoCtxt        []uintptr      // cgo traceback context
     go_slice_t cgoCtxt;
 	// labels         unsafe.Pointer // profiler labels
@@ -379,29 +398,41 @@ typedef struct _go_sudog_t {
 	// channel this sudog is blocking on. shrinkstack depends on
 	// this for sudogs involved in channel ops.
 
-	void* g; 
+	// g *g
+	go_g_t* g;
 
-	void* next;
-	void* prev;
-	void* elem; // data element (may point to stack)
+	// next *sudog
+	struct _go_sudog_t* next;
+	// prev *sudog
+	struct _go_sudog_t* prev;
+	// elem unsafe.Pointer // data element (may point to stack)
+	void* elem;
 
 	// The following fields are never accessed concurrently.
 	// For channels, waitlink is only accessed by g.
 	// For semaphores, all fields (including the ones above)
 	// are only accessed when holding a semaRoot lock.
 
+	// acquiretime int64
 	int64_t acquiretime;
+	// releasetime int64
 	int64_t releasetime;
+	// ticket      uint32
 	uint32_t ticket;
 
 	// isSelect indicates g is participating in a select, so
 	// g.selectDone must be CAS'd to win the wake-up race.
+	// isSelect bool
 	bool isSelect;
 
-	void* parent; // semaRoot binary tree
-	void* waitlink; // g.waiting list or semaRoot
-	void* waittail; // semaRoot
-	void* c; // channel
+	// parent   *sudog // semaRoot binary tree
+	struct _go_sudog_t* parent;
+	// waitlink *sudog // g.waiting list or semaRoot
+	struct _go_sudog_t* waitlink;
+	// waittail *sudog // semaRoot
+	struct _go_sudog_t* waittail;
+	// c        *hchan // channel
+	struct _go_hchan_t* c;
 } go_sudog_t;
 
 typedef struct _go_waitq_t {
@@ -416,16 +447,26 @@ typedef struct _go_runtime_mutex_t {
 } go_runtime_mutex_t;
 
 typedef struct _go_hchan_t {
-	int64_t qcount;           // total data in the queue
-	int64_t dataqsiz;           // size of the circular queue
-	void* buf; // points to an array of dataqsiz elements
+	// qcount   uint           // total data in the queue
+	uint64_t qcount;
+	// dataqsiz uint           // size of the circular queue
+	uint64_t dataqsiz;
+	// buf      unsafe.Pointer // points to an array of dataqsiz elements
+	void* buf;
+	// elemsize uint16
 	uint16_t elemsize;
+	// closed   uint32
 	uint32_t closed;
-	void* elemtype; // element type
-	uint64_t sendx;   // send index
-	uint64_t recvx;   // receive index
-	go_waitq_t recvq;  // list of recv waiters
-	go_waitq_t sendq;  // list of send waiters
+	// elemtype *_type // element type
+	go_type_t* elemtype;
+	// sendx    uint   // send index
+	uint64_t sendx;
+	// recvx    uint   // receive index
+	uint64_t recvx;
+	// recvq    waitq  // list of recv waiters
+	go_waitq_t recvq;
+	// sendq    waitq  // list of send waiters
+	go_waitq_t sendq;
 
 	// lock protects all fields in hchan, as well as several
 	// fields in sudogs blocked on this channel.
@@ -433,6 +474,7 @@ typedef struct _go_hchan_t {
 	// Do not change another G's status while holding this lock
 	// (in particular, do not ready a G), as this can deadlock
 	// with stack shrinking.
+	// lock mutex
 	go_runtime_mutex_t lock;
 } go_hchan_t;
 
