@@ -109,6 +109,16 @@ struct blocked_channel_t {
     blocked_channel_t(app_pc addr, context_handle_t c): chan_addr(addr), ctxt(c) { }
 };
 
+struct go_context_t {
+    unsigned char** ctx;
+    app_pc cancel;
+    context_handle_t create_context;
+    bool with_cancel;
+
+    go_context_t(unsigned char** c, app_pc canc, context_handle_t cc, bool w): 
+                ctx(c), cancel(canc), create_context(cc), with_cancel(w) { }
+};
+
 #define TLS_MEM_REF_BUFF_SIZE 100
 
 static int tls_idx;
@@ -135,6 +145,8 @@ static unordered_map<int64_t, vector<pair<bool, context_handle_t>>> *lock_record
 static unordered_map<int64_t, vector<lock_record_t>> *test_lock_records;
 static unordered_map<int64_t, vector<chan_op_record_t>> *chan_op_records;
 static unordered_map<app_pc, vector<chan_op_record_t>> *op_records_per_chan;
+static vector<go_context_t> *go_context_list;
+static bool inWithDeadline = false;
 
 // client want to do
 void
@@ -147,7 +159,7 @@ CheckLockState(void *drcontext, int64_t cur_goid, context_handle_t cur_ctxt_hndl
             (*lock_records)[cur_goid].emplace_back(1, (*mutex_ctxt_list)[i].create_context);
             context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
             (*test_lock_records)[cur_goid].emplace_back(1, (*mutex_ctxt_list)[i].state_addr, cur_context);
-            DRCCTLIB_PRINTF("GOID(%d) LOCK %p(%d), context: %d", cur_goid, (*mutex_ctxt_list)[i].state_addr, ref->state, cur_context);
+            //DRCCTLIB_PRINTF("GOID(%ld) LOCK %p(%d), context: %d\n", cur_goid, (*mutex_ctxt_list)[i].state_addr, ref->state, cur_context);
             break;
         }
     }
@@ -163,7 +175,7 @@ CheckUnlockState(void *drcontext, int64_t cur_goid, context_handle_t cur_ctxt_hn
             (*lock_records)[cur_goid].emplace_back(0, (*mutex_ctxt_list)[i].create_context);
             context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
             (*test_lock_records)[cur_goid].emplace_back(0, (*mutex_ctxt_list)[i].state_addr, cur_context);
-            DRCCTLIB_PRINTF("GOID(%d) Unlock %p(%d), context: %d", cur_goid, (*mutex_ctxt_list)[i].state_addr, ref->state, cur_context);
+            //DRCCTLIB_PRINTF("GOID(%ld) Unlock %p(%d), context: %d\n", cur_goid, (*mutex_ctxt_list)[i].state_addr, ref->state, cur_context);
             break;
         }
     }
@@ -177,12 +189,12 @@ InsertCleancall(int32_t slot, int32_t num, int32_t state)
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
     int64_t cur_goid = 0;
-    if(pt->goid_list->size() > 0) {
+    if (pt->goid_list->size() > 0) {
         cur_goid = pt->goid_list->back();
     }
     for (int i = 0; i < num; i++) {
         if (pt->cur_buf_list[i].addr != 0 && pt->cur_buf_list[i].state == 0) {
-            if(state == 1) {
+            if (state == 1) {
                 CheckLockState(drcontext, cur_goid, cur_ctxt_hndl, &pt->cur_buf_list[i]);
             } else if (state == 2) {
                 CheckUnlockState(drcontext, cur_goid, cur_ctxt_hndl, &pt->cur_buf_list[i]);
@@ -322,7 +334,7 @@ WrapBeforeRTExecute(void *wrapcxt, void **user_data)
     go_slice_t* ancestors_ptr = go_g_ptr->ancestors;
     if (ancestors_ptr != NULL) {
         go_ancestor_info_t* ancestor_infor_array = (go_ancestor_info_t*)ancestors_ptr->data;
-        for(int i = 0; i < ancestors_ptr->len; i++) {
+        for (int i = 0; i < ancestors_ptr->len; i++) {
             ancestors.push_back(ancestor_infor_array[i].goid);
         }
     }
@@ -333,7 +345,7 @@ static void
 WrapBeforeRTNewObj(void *wrapcxt, void **user_data)
 {
     go_type_t* go_type_ptr = (go_type_t*)dgw_get_go_func_arg(wrapcxt, 0);
-    if(cgo_type_kind_is(go_type_ptr, go_kind_t::kindStruct)) {
+    if (cgo_type_kind_is(go_type_ptr, go_kind_t::kindStruct)) {
         *user_data = (void*)(go_type_ptr);
     } else {
         *user_data = NULL;
@@ -343,11 +355,11 @@ WrapBeforeRTNewObj(void *wrapcxt, void **user_data)
 static void
 WrapEndRTNewObj(void *wrapcxt, void *user_data)
 {
-    if(user_data == NULL) {
+    if (user_data == NULL) {
         return;
     }
     void* drcontext = (void *)drwrap_get_drcontext(wrapcxt);
-    if(drcontext == NULL) {
+    if (drcontext == NULL) {
         drcontext = dr_get_current_drcontext();
         if (drcontext == NULL) {
             DRCCTLIB_EXIT_PROCESS("ERROR: WrapEndRTNewObj drcontext == NULL");
@@ -356,10 +368,10 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
     go_type_t* go_type_ptr = (go_type_t*)user_data;
     string type_str = cgo_get_type_name_string(go_type_ptr, go_firstmoduledata);
-    if(strcmp(type_str.c_str(), "sync.Mutex") == 0) {
+    if (strcmp(type_str.c_str(), "sync.Mutex") == 0) {
         go_sync_mutex_t* ret_ptr = (go_sync_mutex_t*)dgw_get_go_func_retaddr(wrapcxt, 1, 0);
         mutex_ctxt_t mutxt_ctxt = {(app_pc)(&(ret_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
-        DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
+        //DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
         mutex_ctxt_list->push_back(mutxt_ctxt);
     } else if (strcmp(type_str.c_str(), "sync.WaitGroup") == 0) {
         go_sync_waitgroup_t* ret_ptr = (go_sync_waitgroup_t*) dgw_get_go_func_retaddr(wrapcxt, 1, 0);
@@ -383,7 +395,7 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
                     }
                     go_sync_mutex_t* mutex_ptr = (go_sync_mutex_t*)((uint64_t)ret_ptr + offset);
                     mutex_ctxt_t mutxt_ctxt = {(app_pc)(&(mutex_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
-                    DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
+                    //DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
                     mutex_ctxt_list->push_back(mutxt_ctxt);
                 } else if (strcmp(field_type_str.c_str(), "sync.WaitGroup") == 0) {
                     if (!ret_ptr) {
@@ -427,7 +439,7 @@ static void
 WrapEndSyncUnlockSlow(void *wrapcxt, void *user_data)
 {
     mutex_ctxt_t* unlock_slow_mutex_ctxt = (mutex_ctxt_t*)user_data;
-    if(unlock_slow_mutex_ctxt) {
+    if (unlock_slow_mutex_ctxt) {
         unlock_slow_mutex_ctxt->cur_unlock_slow_goid = -1;
     }
 }
@@ -436,7 +448,7 @@ static void
 WrapEndRTMakechan(void *wrapcxt, void *user_data)
 {
     void* drcontext = (void *)drwrap_get_drcontext(wrapcxt);
-    if(drcontext == NULL) {
+    if (drcontext == NULL) {
         drcontext = dr_get_current_drcontext();
         if (drcontext == NULL) {
             DRCCTLIB_EXIT_PROCESS("ERROR: WrapEndRTNewObj drcontext == NULL");
@@ -445,7 +457,7 @@ WrapEndRTMakechan(void *wrapcxt, void *user_data)
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
     go_hchan_t *chan_ptr = (go_hchan_t*) dgw_get_go_func_retaddr(wrapcxt, 2, 0);
     string chan_type_str = cgo_get_type_name_string((go_type_t*) chan_ptr->elemtype, go_firstmoduledata);
-    DRCCTLIB_PRINTF("channel: %p, type: %s, size: %ld\n", chan_ptr, chan_type_str.c_str(), chan_ptr->dataqsiz);
+    //DRCCTLIB_PRINTF("channel: %p, type: %s, size: %ld\n", chan_ptr, chan_type_str.c_str(), chan_ptr->dataqsiz);
 }
 
 static void
@@ -458,8 +470,14 @@ WrapBeforeRTChansend(void *wrapcxt, void **user_data)
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
     (*chan_op_records)[cur_goid].emplace_back(cur_goid, 1, (app_pc) chan_ptr, cur_context);
     (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, 1, (app_pc) chan_ptr, cur_context);
-    DRCCTLIB_PRINTF("send to channel: %p, context: %ld\n", chan_ptr, cur_context);
+    //DRCCTLIB_PRINTF("goid(%ld) chansend to channel: %p, context: %d\n", cur_goid, chan_ptr, cur_context);
 }
+
+// static void
+// WrapBeforeRTsend(void *wrapcxt, void **user_data)
+// {
+    
+// }
 
 static void
 WrapBeforeRTChanrecv(void *wrapcxt, void **user_data)
@@ -471,8 +489,14 @@ WrapBeforeRTChanrecv(void *wrapcxt, void **user_data)
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
     (*chan_op_records)[cur_goid].emplace_back(cur_goid, 2, (app_pc) chan_ptr, cur_context);
     (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, 2, (app_pc) chan_ptr, cur_context);
-    DRCCTLIB_PRINTF("Receive from channel: %p, context: %ld\n", chan_ptr, cur_context);
+    //DRCCTLIB_PRINTF("goid(%ld) chanrecv from channel: %p, context: %d\n", cur_goid, chan_ptr, cur_context);
 }
+
+// static void
+// WrapBeforeRTrecv(void *wrapcxt, void **user_data)
+// {
+    
+// }
 
 static void
 WrapBeforeRTClosechan(void *wrapcxt, void **user_data)
@@ -484,7 +508,7 @@ WrapBeforeRTClosechan(void *wrapcxt, void **user_data)
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
     (*chan_op_records)[cur_goid].emplace_back(cur_goid, 0, (app_pc) chan_ptr, cur_context);
     (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, 0, (app_pc) chan_ptr, cur_context);
-    DRCCTLIB_PRINTF("Close channel: %p, context: %ld\n", chan_ptr, cur_context);
+    //DRCCTLIB_PRINTF("Close channel: %p, context: %d\n", chan_ptr, cur_context);
 }
 
 static void
@@ -516,6 +540,142 @@ WrapBeforeSyncWait(void *wrapcxt, void **user_data)
     }
 }
 
+static void
+WrapBeforeContextWithCancel(void *wrapcxt, void **user_data)
+{
+    if (!inWithDeadline) {
+        void *drcontext = dr_get_current_drcontext();
+        per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+        int64_t cur_goid = pt->goid_list->back();
+        unsigned char** arg_ctx = (unsigned char**) dgw_get_go_func_arg(wrapcxt, 1);
+        DRCCTLIB_PRINTF("GOID(%ld) Before withCancel: %p\n", cur_goid, arg_ctx);
+    }
+}
+
+static void
+WrapEndContextWithCancel(void *wrapcxt, void *user_data)
+{
+    if (!inWithDeadline) {
+        void* drcontext = (void *)drwrap_get_drcontext(wrapcxt);
+        if (drcontext == NULL) {
+            drcontext = dr_get_current_drcontext();
+            if (drcontext == NULL) {
+                DRCCTLIB_EXIT_PROCESS("ERROR: WrapEndContextWithCancel drcontext == NULL");
+            }
+        }
+        per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+        int64_t cur_goid = pt->goid_list->back();
+        context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
+        unsigned char** ret_ctx = (unsigned char**) dgw_get_go_func_retaddr(wrapcxt, 2, 1);
+        app_pc ret_canc = (app_pc) dgw_get_go_func_retaddr(wrapcxt, 2, 2);
+        go_context_list->emplace_back(ret_ctx, ret_canc, cur_context, true);
+        DRCCTLIB_PRINTF("GOID(%ld) create context: %p, cancel function: %p, %p, context: %d, withCancel\n", cur_goid, 
+                        ret_ctx, ret_canc, ret_canc ? (app_pc) *(app_pc*) ret_canc : (app_pc) NULL, cur_context);
+        DRCCTLIB_PRINTF("GOID(%ld) withCancel ends\n", cur_goid);
+    }
+}
+
+static void
+WrapBeforeContextWithTimeout(void *wrapcxt, void **user_data)
+{
+    // void *drcontext = dr_get_current_drcontext();
+    // per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    // int64_t cur_goid = pt->goid_list->back();
+    // unsigned char** arg_ctx1 = (unsigned char**) dgw_get_go_func_arg(wrapcxt, 0);
+    // unsigned char** arg_ctx2 = (unsigned char**) dgw_get_go_func_arg(wrapcxt, 1);
+    // *user_data = NULL;
+    // for (uint64_t i = 0; i < go_context_list->size(); ++i) {
+    //     if ((*go_context_list)[i].ctx1 == arg_ctx1 && (*go_context_list)[i].ctx2 == arg_ctx2) {
+    //         *user_data = (void*) i;
+    //         break;
+    //     }
+    // }
+    // DRCCTLIB_PRINTF("GOID(%ld) Before withTimeout\n", cur_goid);
+}
+
+static void
+WrapEndContextWithTimeout(void *wrapcxt, void *user_data)
+{
+    // void* drcontext = (void *)drwrap_get_drcontext(wrapcxt);
+    // if (drcontext == NULL) {
+    //     drcontext = dr_get_current_drcontext();
+    //     if (drcontext == NULL) {
+    //         DRCCTLIB_EXIT_PROCESS("ERROR: WrapEndContextWithTimeout drcontext == NULL");
+    //     }
+    // }
+    // per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    // int64_t cur_goid = pt->goid_list->back();
+    // context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
+    // unsigned char** ret_ctx1 = (unsigned char**) dgw_get_go_func_retaddr(wrapcxt, 3, 0);
+    // unsigned char** ret_ctx2 = (unsigned char**) dgw_get_go_func_retaddr(wrapcxt, 3, 1);
+    // app_pc ret_canc = (app_pc) dgw_get_go_func_retaddr(wrapcxt, 3, 2);
+    // go_context_list->emplace_back(ret_ctx1, ret_ctx2, ret_canc, cur_context, false);
+    // DRCCTLIB_PRINTF("GOID(%ld) create context: %p, %p, cancel function: %p, context: %d, withTimeout\n", cur_goid, 
+    //                 ret_ctx1, ret_ctx2, ret_canc, cur_context);
+    // if (user_data) {
+    //     size_t parent_index = (size_t)(user_data);
+    //     (*go_context_list)[parent_index].child_list.push_back(go_context_list->size() - 1);
+    //     DRCCTLIB_PRINTF("GOID(%ld) parent: %p, %p, cancel function: %p, context: %d, withCancel: %s\n", cur_goid, 
+    //                     (*go_context_list)[parent_index].ctx1, (*go_context_list)[parent_index].ctx2,
+    //                     (*go_context_list)[parent_index].cancel, (*go_context_list)[parent_index].create_context, 
+    //                     (*go_context_list)[parent_index].with_cancel ? "true" : "false");
+    // }
+    // DRCCTLIB_PRINTF("GOID(%ld) withTimeout ends\n", cur_goid);
+}
+
+static void
+WrapBeforeContextWithDeadline(void *wrapcxt, void **user_data)
+{
+    inWithDeadline = true;
+    void *drcontext = dr_get_current_drcontext();
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    int64_t cur_goid = pt->goid_list->back();
+    unsigned char** arg_ctx = (unsigned char**) dgw_get_go_func_arg(wrapcxt, 1);
+    DRCCTLIB_PRINTF("GOID(%ld) Before withDeadline: %p\n", cur_goid, arg_ctx);
+}
+
+static void
+WrapEndContextWithDeadline(void *wrapcxt, void *user_data)
+{
+    DRCCTLIB_PRINTF("wrapcxt: %p", wrapcxt);
+    void* drcontext = (void *)drwrap_get_drcontext(wrapcxt);
+    if (drcontext == NULL) {
+        drcontext = dr_get_current_drcontext();
+        if (drcontext == NULL) {
+            DRCCTLIB_EXIT_PROCESS("ERROR: WrapEndContextWithDeadline drcontext == NULL");
+        }
+    }
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    int64_t cur_goid = pt->goid_list->back();
+    context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
+    unsigned char** ret_ctx = (unsigned char**) dgw_get_go_func_retaddr(wrapcxt, 5, 1);
+    app_pc ret_canc = (app_pc) dgw_get_go_func_retaddr(wrapcxt, 5, 2);
+    go_context_list->emplace_back(ret_ctx, ret_canc, cur_context, false);
+    DRCCTLIB_PRINTF("GOID(%ld) create context: %p, cancel function: %p, context: %d, withDeadline\n", cur_goid, 
+                    ret_ctx, ret_canc, cur_context);
+    inWithDeadline = false;
+    DRCCTLIB_PRINTF("GOID(%ld) withDeadline ends\n", cur_goid);
+}
+
+static void
+WrapBeforeContextCancelCtxCancel(void *wrapcxt, void **user_data)
+{
+    void *drcontext = dr_get_current_drcontext();
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    int64_t cur_goid = pt->goid_list->back();
+    unsigned char** arg_ctx = (unsigned char**) dgw_get_go_func_arg(wrapcxt, 0);
+    DRCCTLIB_PRINTF("GOID(%ld) Before cancel function, %p\n", cur_goid, arg_ctx);
+}
+
+static void
+WrapEndContextCancelCtxCancel(void *wrapcxt, void *user_data)
+{
+    void *drcontext = dr_get_current_drcontext();
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    int64_t cur_goid = pt->goid_list->back();
+    DRCCTLIB_PRINTF("GOID(%ld) Cancel function ends\n", cur_goid);
+}
+
 static go_moduledata_t*
 GetGoFirstmoduledata(const module_data_t *info)
 {
@@ -541,16 +701,16 @@ GetGoFirstmoduledata(const module_data_t *info)
     go_moduledata_t* firstmoduledata = NULL;
     // in memory
     Elf *elf = elf_memory((char *)map_base, map_size); // Initialize 'elf' pointer to our file descriptor
-    if(find_elf_section_by_name(elf, ".go.buildinfo")) {
+    if (find_elf_section_by_name(elf, ".go.buildinfo")) {
         uint64_t gopclntab_addr = 0;
         Elf_Scn *gopclntab_scn = find_elf_section_by_name(elf, ".gopclntab");
-        if(gopclntab_scn) {
+        if (gopclntab_scn) {
             Elf_Shdr *section_header = elf_getshdr(gopclntab_scn);
             gopclntab_addr = section_header->sh_addr;
             // DRCCTLIB_PRINTF(".gopclntab start addr %p", gopclntab_addr);
         }
         Elf_Scn *noptrdata_scn = find_elf_section_by_name(elf, ".noptrdata");
-        if(noptrdata_scn) {
+        if (noptrdata_scn) {
             Elf_Shdr *section_header = elf_getshdr(noptrdata_scn);
             uint64_t start_addr = section_header->sh_addr;
             uint64_t end_addr = start_addr + section_header->sh_size * 8;
@@ -595,11 +755,11 @@ OnMoudleLoad(void *drcontext, const module_data_t *info,
     const char *modname = dr_module_preferred_name(info);
     for (std::vector<std::string>::iterator i = blacklist->begin();
             i != blacklist->end(); ++i) {
-        if(strstr(modname, i->c_str())) {
+        if (strstr(modname, i->c_str())) {
             return;
         }
     }
-    if(go_firstmoduledata == NULL) {
+    if (go_firstmoduledata == NULL) {
         go_firstmoduledata = GetGoFirstmoduledata(info);
     }
     app_pc func_rt_newobj_entry = moudle_get_function_entry(info, "runtime.newobject", true);
@@ -622,6 +782,16 @@ OnMoudleLoad(void *drcontext, const module_data_t *info,
     if (func_chansend_entry != NULL) {
         drwrap_wrap(func_chansend_entry, WrapBeforeRTChansend, NULL);
     }
+
+    // app_pc func_send_entry = moudle_get_function_entry(info, "runtime.send", true);
+    // if (func_send_entry != NULL) {
+    //     drwrap_wrap(func_send_entry, WrapBeforeRTsend, NULL);
+    // }
+    // app_pc func_recv_entry = moudle_get_function_entry(info, "runtime.recv", true);
+    // if (func_recv_entry != NULL) {
+    //     drwrap_wrap(func_recv_entry, WrapBeforeRTrecv, NULL);
+    // }
+
     app_pc func_chanrecv_entry = moudle_get_function_entry(info, "runtime.chanrecv", true);
     if (func_chanrecv_entry != NULL) {
         drwrap_wrap(func_chanrecv_entry, WrapBeforeRTChanrecv, NULL);
@@ -637,6 +807,24 @@ OnMoudleLoad(void *drcontext, const module_data_t *info,
     app_pc func_sync_wait_entry = moudle_get_function_entry(info, "sync.(*WaitGroup).Wait", true);
     if (func_sync_wait_entry != NULL) {
         drwrap_wrap(func_sync_wait_entry, WrapBeforeSyncWait, NULL);
+    }
+    app_pc func_context_withcancel_entry = moudle_get_function_entry(info, "context.WithCancel", true);
+    if (func_context_withcancel_entry != NULL) {
+        drwrap_wrap(func_context_withcancel_entry, WrapBeforeContextWithCancel, WrapEndContextWithCancel);
+    }
+    app_pc func_context_withtimeout_entry = moudle_get_function_entry(info, "context.WithTimeout", true);
+    if (func_context_withtimeout_entry != NULL) {
+        drwrap_wrap(func_context_withtimeout_entry, WrapBeforeContextWithTimeout, WrapEndContextWithTimeout);
+    }
+    app_pc func_context_withdeadline_entry = moudle_get_function_entry(info, "context.WithDeadline", true);
+    if (func_context_withdeadline_entry != NULL) {
+        DRCCTLIB_PRINTF("func_context_withdeadline_entry: %p", func_context_withdeadline_entry);
+        DRCCTLIB_PRINTF("info: %s", info->full_path);
+        drwrap_wrap(func_context_withdeadline_entry, WrapBeforeContextWithDeadline, WrapEndContextWithDeadline);
+    }
+    app_pc func_context_cancelCtx_cancel_entry = moudle_get_function_entry(info, "context.(*cancelCtx).cancel", true);
+    if (func_context_cancelCtx_cancel_entry != NULL) {
+        drwrap_wrap(func_context_cancelCtx_cancel_entry, WrapBeforeContextCancelCtxCancel, WrapEndContextCancelCtxCancel);
     }
     // DRCCTLIB_PRINTF("finish module name %s", modname);
 }
@@ -734,6 +922,7 @@ InitBuffer()
     test_lock_records = new unordered_map<int64_t, vector<lock_record_t>>();
     chan_op_records = new unordered_map<int64_t, vector<chan_op_record_t>>();
     op_records_per_chan = new unordered_map<app_pc, vector<chan_op_record_t>>();
+    go_context_list = new vector<go_context_t>();
 }
 
 static void
@@ -746,6 +935,7 @@ FreeBuffer()
     delete test_lock_records;
     delete chan_op_records;
     delete op_records_per_chan;
+    delete go_context_list;
 }
 
 static void
@@ -992,7 +1182,7 @@ DetectDeadlock()
             blocked_channel_list.push_back({sends.front().goid, sends.front().op, 
                                             sends.front().chan_addr, sends.front().ctxt});
         } else if (!recvs.empty()) {
-            blocked_channel_list.push_back({sends.front().goid, recvs.front().op, 
+            blocked_channel_list.push_back({recvs.front().goid, recvs.front().op, 
                                             recvs.front().chan_addr, recvs.front().ctxt});
         }
     }
@@ -1072,6 +1262,10 @@ PorcessEndPrint()
     }
 
     DetectDeadlock();
+
+    for (auto go_context : *go_context_list) {
+        DRCCTLIB_PRINTF("context: %p, cancel function: %p\n", go_context.ctx, go_context.cancel);
+    }
     
 }
 
