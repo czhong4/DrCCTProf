@@ -159,7 +159,7 @@ CheckLockState(void *drcontext, int64_t cur_goid, context_handle_t cur_ctxt_hndl
             (*lock_records)[cur_goid].emplace_back(1, (*mutex_ctxt_list)[i].create_context);
             context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
             (*test_lock_records)[cur_goid].emplace_back(1, (*mutex_ctxt_list)[i].state_addr, cur_context);
-            //DRCCTLIB_PRINTF("GOID(%ld) LOCK %p(%d), context: %d\n", cur_goid, (*mutex_ctxt_list)[i].state_addr, ref->state, cur_context);
+            DRCCTLIB_PRINTF("GOID(%ld) LOCK %p(%d), context: %d\n", cur_goid, (*mutex_ctxt_list)[i].state_addr, ref->state, cur_context);
             break;
         }
     }
@@ -175,7 +175,7 @@ CheckUnlockState(void *drcontext, int64_t cur_goid, context_handle_t cur_ctxt_hn
             (*lock_records)[cur_goid].emplace_back(0, (*mutex_ctxt_list)[i].create_context);
             context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
             (*test_lock_records)[cur_goid].emplace_back(0, (*mutex_ctxt_list)[i].state_addr, cur_context);
-            //DRCCTLIB_PRINTF("GOID(%ld) Unlock %p(%d), context: %d\n", cur_goid, (*mutex_ctxt_list)[i].state_addr, ref->state, cur_context);
+            DRCCTLIB_PRINTF("GOID(%ld) Unlock %p(%d), context: %d\n", cur_goid, (*mutex_ctxt_list)[i].state_addr, ref->state, cur_context);
             break;
         }
     }
@@ -344,6 +344,7 @@ WrapBeforeRTExecute(void *wrapcxt, void **user_data)
 static void
 WrapBeforeRTNewObj(void *wrapcxt, void **user_data)
 {
+    // DRCCTLIB_PRINTF("Before runtime newobject, wrapcxt: %p\n", wrapcxt);
     go_type_t* go_type_ptr = (go_type_t*)dgw_get_go_func_arg(wrapcxt, 0);
     if (cgo_type_kind_is(go_type_ptr, go_kind_t::kindStruct)) {
         *user_data = (void*)(go_type_ptr);
@@ -371,7 +372,7 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
     if (strcmp(type_str.c_str(), "sync.Mutex") == 0) {
         go_sync_mutex_t* ret_ptr = (go_sync_mutex_t*)dgw_get_go_func_retaddr(wrapcxt, 1, 0);
         mutex_ctxt_t mutxt_ctxt = {(app_pc)(&(ret_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
-        //DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
+        // DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
         mutex_ctxt_list->push_back(mutxt_ctxt);
     } else if (strcmp(type_str.c_str(), "sync.WaitGroup") == 0) {
         go_sync_waitgroup_t* ret_ptr = (go_sync_waitgroup_t*) dgw_get_go_func_retaddr(wrapcxt, 1, 0);
@@ -395,7 +396,7 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
                     }
                     go_sync_mutex_t* mutex_ptr = (go_sync_mutex_t*)((uint64_t)ret_ptr + offset);
                     mutex_ctxt_t mutxt_ctxt = {(app_pc)(&(mutex_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
-                    //DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
+                    // DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
                     mutex_ctxt_list->push_back(mutxt_ctxt);
                 } else if (strcmp(field_type_str.c_str(), "sync.WaitGroup") == 0) {
                     if (!ret_ptr) {
@@ -407,7 +408,7 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
                     go_sync_waitgroup_t* wg_ptr = (go_sync_waitgroup_t*) ((uint64_t)ret_ptr + offset);
                     waitgroup_ctxt_t waitgroup_ctxt = {(app_pc) wg_ptr, cur_context, 0, 0};
                     wg_ctxt_list->push_back(waitgroup_ctxt);
-                    DRCCTLIB_PRINTF("wg_ctxt %p %d", ret_ptr, waitgroup_ctxt.create_context);
+                    DRCCTLIB_PRINTF("wg_ctxt %p %d", wg_ptr, waitgroup_ctxt.create_context);
                 }
             }
             offset += (uint64_t)field_type->size;
@@ -416,6 +417,7 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
         // DRCCTLIB_PRINTF("[%s]{%ld}", type_str.c_str(), go_type_ptr->size);
         // DRCCTLIB_PRINTF("[%s]{%ld}", type_str.c_str(), cgo_get_struct_fields_length((go_struct_type_t*)go_type_ptr));
     }
+    // DRCCTLIB_PRINTF("runtime newobject ends, wrapcxt: %p\n", wrapcxt);
 }
 
 static void
@@ -548,7 +550,7 @@ WrapBeforeContextWithCancel(void *wrapcxt, void **user_data)
         per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
         int64_t cur_goid = pt->goid_list->back();
         unsigned char** arg_ctx = (unsigned char**) dgw_get_go_func_arg(wrapcxt, 1);
-        DRCCTLIB_PRINTF("GOID(%ld) Before withCancel: %p\n", cur_goid, arg_ctx);
+        DRCCTLIB_PRINTF("GOID(%ld) Before withCancel: %p, wrapcxt: %p\n", cur_goid, arg_ctx, wrapcxt);
     }
 }
 
@@ -571,7 +573,7 @@ WrapEndContextWithCancel(void *wrapcxt, void *user_data)
         go_context_list->emplace_back(ret_ctx, ret_canc, cur_context, true);
         DRCCTLIB_PRINTF("GOID(%ld) create context: %p, cancel function: %p, %p, context: %d, withCancel\n", cur_goid, 
                         ret_ctx, ret_canc, ret_canc ? (app_pc) *(app_pc*) ret_canc : (app_pc) NULL, cur_context);
-        DRCCTLIB_PRINTF("GOID(%ld) withCancel ends\n", cur_goid);
+        DRCCTLIB_PRINTF("GOID(%ld) withCancel ends, wrapcxt: %p\n", cur_goid, wrapcxt);
     }
 }
 
@@ -631,13 +633,12 @@ WrapBeforeContextWithDeadline(void *wrapcxt, void **user_data)
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     int64_t cur_goid = pt->goid_list->back();
     unsigned char** arg_ctx = (unsigned char**) dgw_get_go_func_arg(wrapcxt, 1);
-    DRCCTLIB_PRINTF("GOID(%ld) Before withDeadline: %p\n", cur_goid, arg_ctx);
+    DRCCTLIB_PRINTF("GOID(%ld) Before withDeadline: %p, wrapcxt: %p\n", cur_goid, arg_ctx, wrapcxt);
 }
 
 static void
 WrapEndContextWithDeadline(void *wrapcxt, void *user_data)
 {
-    DRCCTLIB_PRINTF("wrapcxt: %p", wrapcxt);
     void* drcontext = (void *)drwrap_get_drcontext(wrapcxt);
     if (drcontext == NULL) {
         drcontext = dr_get_current_drcontext();
@@ -654,7 +655,7 @@ WrapEndContextWithDeadline(void *wrapcxt, void *user_data)
     DRCCTLIB_PRINTF("GOID(%ld) create context: %p, cancel function: %p, context: %d, withDeadline\n", cur_goid, 
                     ret_ctx, ret_canc, cur_context);
     inWithDeadline = false;
-    DRCCTLIB_PRINTF("GOID(%ld) withDeadline ends\n", cur_goid);
+    DRCCTLIB_PRINTF("GOID(%ld) withDeadline ends, wrapcxt: %p\n", cur_goid, wrapcxt);
 }
 
 static void
@@ -664,7 +665,7 @@ WrapBeforeContextCancelCtxCancel(void *wrapcxt, void **user_data)
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     int64_t cur_goid = pt->goid_list->back();
     unsigned char** arg_ctx = (unsigned char**) dgw_get_go_func_arg(wrapcxt, 0);
-    DRCCTLIB_PRINTF("GOID(%ld) Before cancel function, %p\n", cur_goid, arg_ctx);
+    DRCCTLIB_PRINTF("GOID(%ld) Before cancel function, %p, wrapcxt: %p\n", cur_goid, arg_ctx, wrapcxt);
 }
 
 static void
@@ -673,7 +674,43 @@ WrapEndContextCancelCtxCancel(void *wrapcxt, void *user_data)
     void *drcontext = dr_get_current_drcontext();
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     int64_t cur_goid = pt->goid_list->back();
-    DRCCTLIB_PRINTF("GOID(%ld) Cancel function ends\n", cur_goid);
+    DRCCTLIB_PRINTF("GOID(%ld) Cancel function ends, wrapcxt: %p\n", cur_goid, wrapcxt);
+}
+
+static void
+WrapBeforeRTMoreStack(void *wrapcxt, void **user_data)
+{
+    void *drcontext = dr_get_current_drcontext();
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    int64_t cur_goid = pt->goid_list->back();
+    DRCCTLIB_PRINTF("GOID(%ld) Before runtime more stack, wrapcxt: %p\n", cur_goid, wrapcxt);
+}
+
+static void
+WrapEndRTMoreStack(void *wrapcxt, void *user_data)
+{
+    void *drcontext = dr_get_current_drcontext();
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    int64_t cur_goid = pt->goid_list->back();
+    DRCCTLIB_PRINTF("GOID(%ld) runtime more stack ends, wrapcxt: %p\n", cur_goid, wrapcxt);
+}
+
+static void
+WrapBeforeRTMoreStack2(void *wrapcxt, void **user_data)
+{
+    void *drcontext = dr_get_current_drcontext();
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    int64_t cur_goid = pt->goid_list->back();
+    DRCCTLIB_PRINTF("GOID(%ld) Before runtime more stack2, wrapcxt: %p\n", cur_goid, wrapcxt);
+}
+
+static void
+WrapEndRTMoreStack2(void *wrapcxt, void *user_data)
+{
+    void *drcontext = dr_get_current_drcontext();
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    int64_t cur_goid = pt->goid_list->back();
+    DRCCTLIB_PRINTF("GOID(%ld) runtime more stack2 ends, wrapcxt: %p\n", cur_goid, wrapcxt);
 }
 
 static go_moduledata_t*
@@ -826,6 +863,16 @@ OnMoudleLoad(void *drcontext, const module_data_t *info,
     if (func_context_cancelCtx_cancel_entry != NULL) {
         drwrap_wrap(func_context_cancelCtx_cancel_entry, WrapBeforeContextCancelCtxCancel, WrapEndContextCancelCtxCancel);
     }
+
+    // app_pc func_runtime_more_stack_entry = moudle_get_function_entry(info, "runtime.morestack_noctxt", true);
+    // if (func_runtime_more_stack_entry != NULL) {
+    //     drwrap_wrap(func_runtime_more_stack_entry, WrapBeforeRTMoreStack, WrapEndRTMoreStack);
+    // }
+
+    // app_pc func_runtime_more_stack_2_entry = moudle_get_function_entry(info, "runtime.morestack", true);
+    // if (func_runtime_more_stack_2_entry != NULL) {
+    //     drwrap_wrap(func_runtime_more_stack_2_entry, WrapBeforeRTMoreStack2, WrapEndRTMoreStack2);
+    // }
     // DRCCTLIB_PRINTF("finish module name %s", modname);
 }
 
