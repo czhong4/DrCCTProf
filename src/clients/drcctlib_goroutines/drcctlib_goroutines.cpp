@@ -1319,11 +1319,11 @@ PorcessEndPrint()
 static void
 ClientInit(int argc, const char *argv[])
 {
-    char name[MAXIMUM_PATH] = "";
+    char name[MAXIMUM_FILEPATH] = "";
     DRCCTLIB_INIT_LOG_FILE_NAME(name, "drcctlib_goroutines", "out");
     DRCCTLIB_PRINTF("Creating log file at:%s", name);
     if (argc > 1) {
-        char temp[MAXIMUM_PATH] = "";
+        char temp[MAXIMUM_FILEPATH] = "";
         strcpy(temp, name);
         strcpy(name, argv[1]);
         strcat(name, temp);

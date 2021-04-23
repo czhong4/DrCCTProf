@@ -4,12 +4,9 @@
  *  See LICENSE file for more information.
  */
 
-#include <iterator>
-#include <vector>
-#include <map>
-
 #include "dr_api.h"
 #include "drcctlib.h"
+#include "drcctlib_vscodeex_format.h"
 
 #define DRCCTLIB_PRINTF(_FORMAT, _ARGS...) \
     DRCCTLIB_PRINTF_TEMPLATE("instr_statistics", _FORMAT, ##_ARGS)
@@ -26,37 +23,39 @@
 #define TOP_REACH_NUM_SHOW 200
 
 uint64_t *gloabl_hndl_call_num;
-static file_t gTraceFile;
 
 using namespace std;
+using namespace DrCCTProf;
 
-// client want to do
-void
-DoWhatClientWantTodo(void *drcontext, context_handle_t cur_ctxt_hndl)
+// dr clean call per ins cache
+static inline void
+InstrumentPerInsCache(void *drcontext, context_handle_t ctxt_hndl, int32_t mem_ref_num,
+                      mem_ref_msg_t *mem_ref_start, void *data)
 {
-    // use {cur_ctxt_hndl}
-    gloabl_hndl_call_num[cur_ctxt_hndl]++;
+    gloabl_hndl_call_num[ctxt_hndl]++;
 }
 
-// dr clean call
-void
-InsertCleancall(int32_t slot)
+static inline void
+InstrumentPerBBCache(void *drcontext, context_handle_t ctxt_hndl, int32_t slot_num,
+                     int32_t mem_ref_num, mem_ref_msg_t *mem_ref_start, void **data)
 {
-    void *drcontext = dr_get_current_drcontext();
-    context_handle_t cur_ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
-    DoWhatClientWantTodo(drcontext, cur_ctxt_hndl);
-}
-
-// analysis
-void
-InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
-{
-
-    instrlist_t *bb = instrument_msg->bb;
-    instr_t *instr = instrument_msg->instr;
-    int32_t slot = instrument_msg->slot;
-
-    dr_insert_clean_call(drcontext, bb, instr, (void *)InsertCleancall, false, 1, OPND_CREATE_CCT_INT(slot));
+    int32_t temp_index = 0;
+    for (int32_t i = 0; i < slot_num; i++) {
+        int32_t ins_ref_number = 0;
+        mem_ref_msg_t *ins_cache_mem_start = NULL;
+        for (; temp_index < mem_ref_num; temp_index++) {
+            if (mem_ref_start[temp_index].slot == i) {
+                if (ins_cache_mem_start == NULL) {
+                    ins_cache_mem_start = mem_ref_start + temp_index;
+                }
+                ins_ref_number++;
+            } else if (mem_ref_start[temp_index].slot > i) {
+                break;
+            }
+        }
+        InstrumentPerInsCache(drcontext, ctxt_hndl + i, ins_ref_number,
+                              ins_cache_mem_start, data);
+    }
 }
 
 static inline void
@@ -79,22 +78,9 @@ FreeGlobalBuff()
 static void
 ClientInit(int argc, const char *argv[])
 {
-    char name[MAXIMUM_FILEPATH] = "";
-    DRCCTLIB_INIT_LOG_FILE_NAME(
-        name, "drcctlib_instr_statistics_clean_call", "out");
-    DRCCTLIB_PRINTF("Creating log file at:%s", name);
-
-    gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
-    DR_ASSERT(gTraceFile != INVALID_FILE);
-    // print the arguments passed
-    dr_fprintf(gTraceFile, "\n");
-    for (int i = 0; i < argc; i++) {
-        dr_fprintf(gTraceFile, "%d %s ", i, argv[i]);
-    }
-    dr_fprintf(gTraceFile, "\n");
-
     InitGlobalBuff();
-    drcctlib_init(DRCCTLIB_FILTER_ALL_INSTR, INVALID_FILE, InstrumentInsCallback, false);
+    drcctlib_init_ex(DRCCTLIB_FILTER_ALL_INSTR, INVALID_FILE, NULL, NULL,
+                     InstrumentPerBBCache, DRCCTLIB_CACHE_MODE);
 }
 
 typedef struct _output_format_t {
@@ -142,25 +128,21 @@ ClientExit(void)
             }
         }
     }
-
+    Profile::profile_t* profile = new Profile::profile_t();
+    profile->add_metric_type(1, "times", "instruction execute times");
     for (int32_t i = 0; i < TOP_REACH_NUM_SHOW; i++) {
         if (output_list[i].handle == 0) {
             break;
         }
-        dr_fprintf(gTraceFile, "NO. %d PC ", i + 1);
-        drcctlib_print_backtrace_first_item(gTraceFile, output_list[i].handle, true, false);
-        dr_fprintf(gTraceFile, "=>EXECUTION TIMES\n%lld\n=>BACKTRACE\n",
-                   output_list[i].count);
-        drcctlib_print_backtrace(gTraceFile, output_list[i].handle, true, true, -1);
-        dr_fprintf(gTraceFile, "\n\n\n");
-        
-        
+        inner_context_t* cur_ctxt = drcctlib_get_full_cct(output_list[i].handle);
+        profile->add_sample(cur_ctxt)->append_metirc(output_list[i].count);
+        drcctlib_free_full_cct(cur_ctxt);
     }
+    profile->serialize_to_file("instr_statistics.normal.drcctprof");
+    delete profile;
     dr_global_free(output_list, TOP_REACH_NUM_SHOW * sizeof(output_format_t));
     FreeGlobalBuff();
     drcctlib_exit();
-
-    dr_close_file(gTraceFile);
 }
 
 #ifdef __cplusplus
@@ -170,7 +152,7 @@ extern "C" {
 DR_EXPORT void
 dr_client_main(client_id_t id, int argc, const char *argv[])
 {
-    dr_set_client_name("DynamoRIO Client 'drcctlib_instr_statistics_clean_call'",
+    dr_set_client_name("DynamoRIO Client 'drcctlib_instr_statistics_vse_fmt'",
                        "http://dynamorio.org/issues");
 
     ClientInit(argc, argv);

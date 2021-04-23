@@ -5,18 +5,21 @@
  */
 
 #include <map>
+#include <string>
+#include <sys/stat.h>
 
 #include "dr_api.h"
 #include "drmgr.h"
 #include "drcctlib.h"
-#include "drcctlib_hpcviewer_format.h"
+#include "drcctlib_vscodeex_format.h"
 
 using namespace std;
+using namespace DrCCTProf;
 
 #define DRCCTLIB_PRINTF(_FORMAT, _ARGS...) \
-    DRCCTLIB_PRINTF_TEMPLATE("reuse_distance_hpc_fmt", _FORMAT, ##_ARGS)
+    DRCCTLIB_PRINTF_TEMPLATE("reuse_distance", _FORMAT, ##_ARGS)
 #define DRCCTLIB_EXIT_PROCESS(_FORMAT, _ARGS...) \
-    DRCCTLIB_CLIENT_EXIT_PROCESS_TEMPLATE("reuse_distance_hpc_fmt", _FORMAT, ##_ARGS)
+    DRCCTLIB_CLIENT_EXIT_PROCESS_TEMPLATE("reuse_distance", _FORMAT, ##_ARGS)
 
 #define SAMPLE_RUN
 #ifdef SAMPLE_RUN
@@ -29,7 +32,13 @@ using namespace std;
 #define REUSED_PRINT_MIN_COUNT 1000
 #define MAX_CLIENT_CCT_PRINT_DEPTH 10
 
+#ifdef DEBUG_REUSE
+static std::string g_folder_name;
+#endif
 static int tls_idx;
+
+void *lock; 
+Profile::profile_t* reuse_profile;
 
 typedef struct _use_node_t {
     context_handle_t create_hndl;
@@ -142,7 +151,7 @@ UpdateUseAndReuseMap(void *drcontext, per_thread_t *pt, uint64_t cur_mem_idx,
 }
 
 void
-PrintTopN(void *drcontext, per_thread_t *pt, uint64_t print_num)
+PrintTopN(per_thread_t *pt, uint64_t print_num)
 {
     // print_num = (*(pt->tls_reuse_map)).size();
     output_format_t *output_format_list =
@@ -199,23 +208,50 @@ PrintTopN(void *drcontext, per_thread_t *pt, uint64_t print_num)
             }
         }
     }
-    
-    vector<HPCRunCCT_t *> hpcRunNodes;
-    for (uint i = 0; i < print_num; i++) {
-        if (output_format_list[i].count <= 0) {
-            continue;
-        }
-        HPCRunCCT_t *hpcRunNode = new HPCRunCCT_t();
-        hpcRunNode->ctxt_hndl_list.push_back(output_format_list[i].create_hndl);
-        hpcRunNode->ctxt_hndl_list.push_back(output_format_list[i].use_hndl);
-        hpcRunNode->ctxt_hndl_list.push_back(output_format_list[i].reuse_hndl);
-        hpcRunNode->metric_list.push_back(output_format_list[i].count);
-        hpcRunNode->metric_list.push_back(output_format_list[i].distance);
-        hpcRunNodes.push_back(hpcRunNode);
-    }
-    build_thread_custom_cct_hpurun_format(hpcRunNodes, drcontext);
-    write_thread_custom_cct_hpurun_format(drcontext);
 
+    dr_mutex_lock(lock);
+    for (uint64_t i = 0; i < print_num; i++) {
+        if (output_format_list[i].count == 0 || output_format_list[i].create_hndl == 0)
+            continue;
+        inner_context_t* create_ctxt = NULL;
+        if (output_format_list[i].create_hndl > 0) {
+            create_ctxt = drcctlib_get_full_cct(output_format_list[i].create_hndl);
+            Profile::sample_t* create_sample = reuse_profile->add_sample(create_ctxt);
+            create_sample->append_metirc((int64_t)1);
+            create_sample->append_metirc((uint64_t)0);
+            create_sample->append_metirc((uint64_t)0);
+            create_sample->append_metirc((uint64_t)output_format_list[i].count);
+            create_sample->append_metirc((uint64_t)output_format_list[i].distance);
+        } else {
+            create_ctxt = drcctlib_get_full_cct_of_static_datacentric_nodes(-output_format_list[i].create_hndl);
+            Profile::sample_t* create_sample = reuse_profile->add_sample(create_ctxt);
+            create_sample->append_metirc((int64_t)0);
+            create_sample->append_metirc((uint64_t)0);
+            create_sample->append_metirc((uint64_t)0);
+            create_sample->append_metirc((uint64_t)output_format_list[i].count);
+            create_sample->append_metirc((uint64_t)output_format_list[i].distance);
+        }
+        inner_context_t* use_ctxt = drcctlib_get_full_cct(output_format_list[i].use_hndl);
+        Profile::sample_t* use_sample = reuse_profile->add_sample(use_ctxt);
+        use_sample->append_metirc((int64_t)2);
+        use_sample->append_metirc((uint64_t)create_ctxt->ctxt_hndl);
+        use_sample->append_metirc((uint64_t)0);
+        use_sample->append_metirc((uint64_t)output_format_list[i].count);
+        use_sample->append_metirc((uint64_t)output_format_list[i].distance);
+        
+        inner_context_t* reuse_ctxt = drcctlib_get_full_cct(output_format_list[i].reuse_hndl);
+        Profile::sample_t* reuse_sample = reuse_profile->add_sample(reuse_ctxt);
+        reuse_sample->append_metirc((int64_t)3);
+        reuse_sample->append_metirc((uint64_t)create_ctxt->ctxt_hndl);
+        reuse_sample->append_metirc((uint64_t)use_ctxt->ctxt_hndl);
+        reuse_sample->append_metirc((uint64_t)output_format_list[i].count);
+        reuse_sample->append_metirc((uint64_t)output_format_list[i].distance);
+
+        drcctlib_free_full_cct(create_ctxt);
+        drcctlib_free_full_cct(use_ctxt);
+        drcctlib_free_full_cct(reuse_ctxt);
+    }
+    dr_mutex_unlock(lock);
     dr_global_free(output_format_list, print_num * sizeof(output_format_t));
 }
 
@@ -263,11 +299,9 @@ static void
 ThreadDebugFileInit(per_thread_t *pt)
 {
     int32_t id = drcctlib_get_thread_id();
-    char debug_file_name[MAXIMUM_FILEPATH] = "";
-    DRCCTLIB_INIT_THREAD_LOG_FILE_NAME(
-        debug_file_name, "drcctlib_reuse_distance_hpc_fmt", id, "debug.log");
-    pt->log_file =
-        dr_open_file(debug_file_name, DR_FILE_WRITE_APPEND | DR_FILE_ALLOW_LARGE);
+    char name[MAXIMUM_FILEPATH] = "";
+    sprintf(name + strlen(name), "%s/thread-%d.debug.log", g_folder_name.c_str(), id);
+    pt->log_file = dr_open_file(name, DR_FILE_WRITE_APPEND | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(pt->log_file != INVALID_FILE);
 }
 #endif
@@ -296,7 +330,7 @@ static void
 ClientThreadEnd(void *drcontext)
 {
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
-    PrintTopN(drcontext, pt, OUTPUT_SIZE);
+    PrintTopN(pt, OUTPUT_SIZE);
     delete pt->tls_use_map;
     delete pt->tls_reuse_map;
 #ifdef DEBUG_REUSE
@@ -308,20 +342,29 @@ ClientThreadEnd(void *drcontext)
 static void
 ClientInit(int argc, const char *argv[])
 {
+    reuse_profile = new Profile::profile_t();
+    // sample type 0:salloc 1:dalloc 2:use 3:reuse 
+    reuse_profile->add_metric_type(0, " ", "sample type");
+    reuse_profile->add_metric_type(1, " ", "alloc context");
+    reuse_profile->add_metric_type(1, " ", "use context");
+    reuse_profile->add_metric_type(1, " ", "counts");
+    reuse_profile->add_metric_type(1, " ", "total distance");
 }
 
 static void
 ClientExit(void)
 {
+    reuse_profile->serialize_to_file("reusedistance.normal.drcctprof");
+    delete reuse_profile;
     drcctlib_exit();
-    hpcrun_format_exit();
     if (!drmgr_unregister_thread_init_event(ClientThreadStart) ||
         !drmgr_unregister_thread_exit_event(ClientThreadEnd) ||
         !drmgr_unregister_tls_field(tls_idx)) {
         DRCCTLIB_PRINTF(
-            "ERROR: drcctlib_reuse_distance_hpc_fmt failed to unregister in ClientExit");
+            "ERROR: drcctlib_reuse_distance_vse_fmt failed to unregister in ClientExit");
     }
     drmgr_exit();
+    dr_mutex_destroy(lock);
 }
 
 #ifdef __cplusplus
@@ -331,13 +374,13 @@ extern "C" {
 DR_EXPORT void
 dr_client_main(client_id_t id, int argc, const char *argv[])
 {
-    dr_set_client_name("DynamoRIO Client 'drcctlib_reuse_distance_hpc_fmt'",
+    dr_set_client_name("DynamoRIO Client 'drcctlib_reuse_distance_vse_fmt'",
                        "http://dynamorio.org/issues");
     ClientInit(argc, argv);
 
     if (!drmgr_init()) {
         DRCCTLIB_EXIT_PROCESS(
-            "ERROR: drcctlib_reuse_distance_hpc_fmt unable to initialize drmgr");
+            "ERROR: drcctlib_reuse_distance_vse_fmt unable to initialize drmgr");
     }
     drmgr_priority_t thread_init_pri = { sizeof(thread_init_pri),
                                          "drcctlib_reuse-thread_init", NULL, NULL,
@@ -350,15 +393,13 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     tls_idx = drmgr_register_tls_field();
     if (tls_idx == -1) {
         DRCCTLIB_EXIT_PROCESS(
-            "ERROR: drcctlib_reuse_distance_hpc_fmt drmgr_register_tls_field fail");
+            "ERROR: drcctlib_reuse_distance_vse_fmt drmgr_register_tls_field fail");
     }
+    lock = dr_mutex_create();
     drcctlib_init_ex(DRCCTLIB_FILTER_MEM_ACCESS_INSTR, INVALID_FILE, NULL, NULL,
                      InstrumentPerBBCache,
                      DRCCTLIB_COLLECT_DATA_CENTRIC_MESSAGE | DRCCTLIB_CACHE_MODE |
                          DRCCTLIB_CACHE_MEMEORY_ACCESS_ADDR);
-    hpcrun_format_init(dr_get_application_name(), false);
-    hpcrun_create_metric("SUM_COUNT");
-    hpcrun_create_metric("AVG_DIS");
     dr_register_exit_event(ClientExit);
 }
 
