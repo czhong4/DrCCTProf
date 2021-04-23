@@ -372,7 +372,7 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
     if (strcmp(type_str.c_str(), "sync.Mutex") == 0) {
         go_sync_mutex_t* ret_ptr = (go_sync_mutex_t*)dgw_get_go_func_retaddr(wrapcxt, 1, 0);
         mutex_ctxt_t mutxt_ctxt = {(app_pc)(&(ret_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
-        // DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
+        DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
         mutex_ctxt_list->push_back(mutxt_ctxt);
     } else if (strcmp(type_str.c_str(), "sync.WaitGroup") == 0) {
         go_sync_waitgroup_t* ret_ptr = (go_sync_waitgroup_t*) dgw_get_go_func_retaddr(wrapcxt, 1, 0);
@@ -396,7 +396,7 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
                     }
                     go_sync_mutex_t* mutex_ptr = (go_sync_mutex_t*)((uint64_t)ret_ptr + offset);
                     mutex_ctxt_t mutxt_ctxt = {(app_pc)(&(mutex_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
-                    // DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
+                    DRCCTLIB_PRINTF("mutxt_ctxt %p %p %d", ret_ptr, mutxt_ctxt.state_addr, mutxt_ctxt.create_context);
                     mutex_ctxt_list->push_back(mutxt_ctxt);
                 } else if (strcmp(field_type_str.c_str(), "sync.WaitGroup") == 0) {
                     if (!ret_ptr) {
@@ -459,7 +459,7 @@ WrapEndRTMakechan(void *wrapcxt, void *user_data)
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
     go_hchan_t *chan_ptr = (go_hchan_t*) dgw_get_go_func_retaddr(wrapcxt, 2, 0);
     string chan_type_str = cgo_get_type_name_string((go_type_t*) chan_ptr->elemtype, go_firstmoduledata);
-    //DRCCTLIB_PRINTF("channel: %p, type: %s, size: %ld\n", chan_ptr, chan_type_str.c_str(), chan_ptr->dataqsiz);
+    DRCCTLIB_PRINTF("channel: %p, type: %s, size: %ld\n", chan_ptr, chan_type_str.c_str(), chan_ptr->dataqsiz);
 }
 
 static void
@@ -472,7 +472,7 @@ WrapBeforeRTChansend(void *wrapcxt, void **user_data)
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
     (*chan_op_records)[cur_goid].emplace_back(cur_goid, 1, (app_pc) chan_ptr, cur_context);
     (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, 1, (app_pc) chan_ptr, cur_context);
-    //DRCCTLIB_PRINTF("goid(%ld) chansend to channel: %p, context: %d\n", cur_goid, chan_ptr, cur_context);
+    DRCCTLIB_PRINTF("goid(%ld) chansend to channel: %p, context: %d\n", cur_goid, chan_ptr, cur_context);
 }
 
 // static void
@@ -491,7 +491,7 @@ WrapBeforeRTChanrecv(void *wrapcxt, void **user_data)
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
     (*chan_op_records)[cur_goid].emplace_back(cur_goid, 2, (app_pc) chan_ptr, cur_context);
     (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, 2, (app_pc) chan_ptr, cur_context);
-    //DRCCTLIB_PRINTF("goid(%ld) chanrecv from channel: %p, context: %d\n", cur_goid, chan_ptr, cur_context);
+    DRCCTLIB_PRINTF("goid(%ld) chanrecv from channel: %p, context: %d\n", cur_goid, chan_ptr, cur_context);
 }
 
 // static void
@@ -510,7 +510,7 @@ WrapBeforeRTClosechan(void *wrapcxt, void **user_data)
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
     (*chan_op_records)[cur_goid].emplace_back(cur_goid, 0, (app_pc) chan_ptr, cur_context);
     (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, 0, (app_pc) chan_ptr, cur_context);
-    //DRCCTLIB_PRINTF("Close channel: %p, context: %d\n", chan_ptr, cur_context);
+    // DRCCTLIB_PRINTF("Close channel: %p, context: %d\n", chan_ptr, cur_context);
 }
 
 static void
@@ -1322,6 +1322,12 @@ ClientInit(int argc, const char *argv[])
     char name[MAXIMUM_PATH] = "";
     DRCCTLIB_INIT_LOG_FILE_NAME(name, "drcctlib_goroutines", "out");
     DRCCTLIB_PRINTF("Creating log file at:%s", name);
+    if (argc > 1) {
+        char temp[MAXIMUM_PATH] = "";
+        strcpy(temp, name);
+        strcpy(name, argv[1]);
+        strcat(name, temp);
+    }
 
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
