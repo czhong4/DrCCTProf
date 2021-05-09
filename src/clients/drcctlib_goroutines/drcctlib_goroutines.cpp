@@ -145,6 +145,7 @@ static unordered_map<int64_t, vector<pair<bool, context_handle_t>>> *lock_record
 static unordered_map<int64_t, vector<lock_record_t>> *test_lock_records;
 static unordered_map<int64_t, vector<chan_op_record_t>> *chan_op_records;
 static unordered_map<app_pc, vector<chan_op_record_t>> *op_records_per_chan;
+static unordered_map<app_pc, context_handle_t> *chan_map;
 static vector<go_context_t> *go_context_list;
 static bool inWithDeadline = false;
 
@@ -459,6 +460,7 @@ WrapEndRTMakechan(void *wrapcxt, void *user_data)
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
     go_hchan_t *chan_ptr = (go_hchan_t*) dgw_get_go_func_retaddr(wrapcxt, 2, 0);
     string chan_type_str = cgo_get_type_name_string((go_type_t*) chan_ptr->elemtype, go_firstmoduledata);
+    (*chan_map)[(app_pc)chan_ptr] = cur_context;
     DRCCTLIB_PRINTF("channel: %p, type: %s, size: %ld\n", chan_ptr, chan_type_str.c_str(), chan_ptr->dataqsiz);
 }
 
@@ -883,8 +885,8 @@ PrintAllRTExec(per_thread_t *pt)
 
     for (uint64_t i = 0; i < pt->goid_list->size(); i++) {
         context_handle_t exec_ctxt = (*(pt->call_rt_exec_list))[i];
-        dr_fprintf(gTraceFile, "\nthread(%ld) runtime.execute to test_goid(%d)", pt->thread_id, (*(pt->goid_list))[i]);    
-        drcctlib_print_ctxt_hndl_msg(gTraceFile, exec_ctxt, false, false);
+        dr_fprintf(gTraceFile, "\nthread(%ld) runtime.execute to test_goid(%d)", pt->thread_id, (*(pt->goid_list))[i]);
+        drcctlib_print_backtrace_first_item(gTraceFile, exec_ctxt, false, false);
 
         if((*(pt->go_ancestors_list))[i].size() > 0) {
             dr_fprintf(gTraceFile, "created by Goroutine(s) ");
@@ -900,8 +902,7 @@ PrintAllRTExec(per_thread_t *pt)
         dr_fprintf(gTraceFile,
                    "====================================================================="
                    "===========\n");
-        drcctlib_print_full_cct(gTraceFile, exec_ctxt, true, true,
-                                -1);
+        drcctlib_print_backtrace(gTraceFile, exec_ctxt, true, true, -1);
         dr_fprintf(gTraceFile,
                    "====================================================================="
                    "===========\n\n\n");
@@ -969,6 +970,7 @@ InitBuffer()
     test_lock_records = new unordered_map<int64_t, vector<lock_record_t>>();
     chan_op_records = new unordered_map<int64_t, vector<chan_op_record_t>>();
     op_records_per_chan = new unordered_map<app_pc, vector<chan_op_record_t>>();
+    chan_map = new unordered_map<app_pc, context_handle_t>();
     go_context_list = new vector<go_context_t>();
 }
 
@@ -982,6 +984,7 @@ FreeBuffer()
     delete test_lock_records;
     delete chan_op_records;
     delete op_records_per_chan;
+    delete chan_map;
     delete go_context_list;
 }
 
@@ -1238,8 +1241,12 @@ DetectDeadlock()
     dr_fprintf(gTraceFile, "Blocked wait groups:\n");
     for (size_t i = 0; i < wg_ctxt_list->size(); i++) {
         if ((*wg_ctxt_list)[i].counter > 0) {
-            dr_fprintf(gTraceFile, "%p is blocked at %d\n", 
-                       (*wg_ctxt_list)[i].addr, (*wg_ctxt_list)[i].wait_context);
+            // dr_fprintf(gTraceFile, "%p is blocked at %d\n", 
+            //            (*wg_ctxt_list)[i].addr, (*wg_ctxt_list)[i].wait_context);
+            dr_fprintf(gTraceFile, "%p is blocked\n", (*wg_ctxt_list)[i].addr);
+            if ((*wg_ctxt_list)[i].wait_context) {
+                drcctlib_print_backtrace_first_item(gTraceFile, (*wg_ctxt_list)[i].wait_context, false, true);
+            }
         }
     }
     
@@ -1262,6 +1269,13 @@ DetectDeadlock()
             for (const auto &deadlock : chan_deadlock_group) {
                 dr_fprintf(gTraceFile, "        goid: %ld, chan: %p, mutex: %p\n",
                         deadlock.goid, deadlock.chan, deadlock.mutex);
+                drcctlib_print_backtrace_first_item(gTraceFile, (*chan_map)[deadlock.chan], false, true);
+                for (auto mu : *mutex_ctxt_list) {
+                    if (mu.state_addr == deadlock.mutex) {
+                        drcctlib_print_backtrace_first_item(gTraceFile, mu.create_context, false, true);
+                        drcctlib_print_backtrace(gTraceFile, mu.create_context, true, true, -1);
+                    }
+                }
             }
             dr_fprintf(gTraceFile, "\n");
         }
@@ -1345,11 +1359,11 @@ ClientInit(int argc, const char *argv[])
     drreg_options_t ops = { sizeof(ops), 4 /*max slots needed*/, false };
     if (drreg_init(&ops) != DRREG_SUCCESS) {
         DRCCTLIB_EXIT_PROCESS(
-            "ERROR: drcctlib_reuse_distance_client_cache unable to initialize drreg");
+            "ERROR: drcctlib_goroutines unable to initialize drreg");
     }
     if (!drutil_init()) {
         DRCCTLIB_EXIT_PROCESS(
-            "ERROR: drcctlib_reuse_distance_client_cache unable to initialize drutil");
+            "ERROR: drcctlib_goroutines unable to initialize drutil");
     }
     if (!drwrap_init()) {
         DRCCTLIB_EXIT_PROCESS("ERROR: drcctlib_goroutines "
@@ -1363,7 +1377,7 @@ ClientInit(int argc, const char *argv[])
     }
     if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, INSTRACE_TLS_COUNT, 0)) {
         DRCCTLIB_EXIT_PROCESS(
-            "ERROR: drcctlib_reuse_distance_client_cache dr_raw_tls_calloc fail");
+            "ERROR: drcctlib_goroutines dr_raw_tls_calloc fail");
     }
     drmgr_priority_t after_drcctlib_thread_init_pri = { sizeof(after_drcctlib_thread_init_pri),
                                          "drcctlib_goroutines-thread_init", NULL, NULL,
@@ -1397,7 +1411,7 @@ ClientExit(void)
 
     if (!dr_raw_tls_cfree(tls_offs, INSTRACE_TLS_COUNT)) {
         DRCCTLIB_EXIT_PROCESS(
-            "ERROR: drcctlib_reuse_distance_client_cache dr_raw_tls_calloc fail");
+            "ERROR: drcctlib_goroutines dr_raw_tls_calloc fail");
     }
 
     if (!drmgr_unregister_thread_init_event(ClientThreadStart) ||
