@@ -18,6 +18,17 @@ if (UNIX)
   add_compile_options(-Werror=narrowing)
   add_compile_options(-std=c++11)
 
+  execute_process(COMMAND go version
+                  COMMAND cut -c 12-
+                  COMMAND rev
+                  COMMAND cut -d " " -f2-
+                  COMMAND rev
+                  COMMAND tr -s '.' '_'
+                  OUTPUT_VARIABLE GO_VERSION
+                  OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  add_compile_options(-D ${GO_VERSION})
+
   if (DEBUG)
     add_compile_options(-g)
   endif (DEBUG)

@@ -60,52 +60,95 @@ typedef struct _go_type_t{
 	void* ptrdata;
 	// hash       uint32
 	uint32_t hash;
+#if defined go1_6_4
+	// _unused    uint8
+	uint8_t _unused;
+#endif
+#if defined go1_15_6
 	// tflag      tflag
 	uint8_t tflag;
+#endif
 	// align      uint8
 	uint8_t align;
 	// fieldAlign uint8
 	uint8_t fieldAlign;
 	// kind       uint8
 	uint8_t kind;
+#if defined go1_6_4
+	// alg        *typeAlg
+	void* alg;
+#endif
+#if defined go1_15_6
 	// // function for comparing objects of this type
 	// // (ptr to object A, ptr to object B) -> ==?
 	// equal func(unsafe.Pointer, unsafe.Pointer) bool
 	void* equal;
+#endif
 	// // gcdata stores the GC type data for the garbage collector.
 	// // If the KindGCProg bit is set in kind, gcdata is a GC program.
 	// // Otherwise it is a ptrmask bitmap. See mbitmap.go for details.
 	// gcdata    *byte
 	uint8_t* gcdata;
+#if defined go1_6_4
+	// _string *string
+	void* _string;
+	// x       *uncommontype
+	void* x;
+	// ptrto   *_type
+	void* ptrto;
+#endif
+#if defined go1_15_6
 	// str       nameOff
 	int32_t str;
 	// ptrToThis typeOff
     int32_t ptrToThis;
+#endif
 } go_type_t;
 
+#if defined go1_15_6
 typedef struct _go_name_t{
 	// bytes *byte
 	uint8_t* byte;
 } go_name_t;
+#endif
 
 typedef struct _go_struct_type_t{
 	// rtype
 	go_type_t type;
+#if defined go1_15_6
 	// pkgPath name
 	go_name_t pkgPath;
+#endif
 	// fields  []structField // sorted by offset
 	go_slice_t fields;
 } go_struct_type_t;
 
 typedef struct _go_struct_field_t{
+#if defined go1_6_4
+	// name    *string
+	void* name;
+	// pkgpath *string
+	void* pkgpath;
+#endif
+#if defined go1_15_6
 	// name       name
 	go_name_t name;
+#endif
 	// typ        *_type
-	go_type_t* type;
+	go_type_t* typ;
+#if defined go1_6_4
+	// tag     *string
+	void* tag;
+	// offset  uintptr
+	void* offset;
+#endif
+#if defined go1_15_6
 	// offsetAnon uintptr
 	void* offsetAnon;
+#endif
 } go_struct_field_t;
 
+#if defined go1_15_6
 // ancestorInfo records details of where a goroutine was started.
 typedef struct _go_ancestor_info_t {
 	// pcs  []uintptr // pcs from the stack of this goroutine
@@ -115,6 +158,7 @@ typedef struct _go_ancestor_info_t {
 	// gopc uintptr   // pc of go statement that created this goroutine
     void* gopc;
 } go_ancestor_info_t;
+#endif
 
 typedef struct _go_string_t {
     void* data;
@@ -133,8 +177,10 @@ typedef struct _go_hmap_t {
     uint8_t flags; 
 	// B         uint8  // log_2 of # of buckets (can hold up to loadFactor * 2^B items)
     uint8_t B;
+#if defined go1_15_6
 	// noverflow uint16 // approximate number of overflow buckets; see incrnoverflow for details
     uint16_t noverflow;
+#endif
 	// hash0     uint32 // hash seed
     uint32_t hash0;
 
@@ -144,8 +190,24 @@ typedef struct _go_hmap_t {
     void* oldbuckets;
 	// nevacuate  uintptr        // progress counter for evacuation (buckets less than this have been evacuated)
     void* nevacuate;
+
+#if defined go1_6_4
+	// If both key and value do not contain pointers and are inline, then we mark bucket
+	// type as containing no pointers. This avoids scanning such maps.
+	// However, bmap.overflow is a pointer. In order to keep overflow buckets
+	// alive, we store pointers to all overflow buckets in hmap.overflow.
+	// Overflow is used only if key and value do not contain pointers.
+	// overflow[0] contains overflow buckets for hmap.buckets.
+	// overflow[1] contains overflow buckets for hmap.oldbuckets.
+	// The first indirection allows us to reduce static size of hmap.
+	// The second indirection allows to store a pointer to the slice in hiter.
+	// overflow *[2]*[]*bmap
+	void* overflow;
+#endif
+#if defined go1_15_6
 	// extra *mapextra // optional fields
     void* extra;
+#endif
 } go_hmap_t;
 
 // typedef struct _go_type_name_t {
@@ -189,10 +251,17 @@ typedef struct _go_moduledata_t {
 	void* end;
     void* gcdata;
     void* gcbss;
+#if defined go1_6_4
+	// typelinks []*_type
+	go_slice_t typelinks;
+#endif
+#if defined go1_15_6
     // types, etypes         uintptr
     void* types;
     void* etypes;
+#endif
 
+#if defined go1_15_6
 	// textsectmap []textsect
     go_slice_t textsectmap;
 	// typelinks   []int32 // offsets from types
@@ -215,15 +284,18 @@ typedef struct _go_moduledata_t {
 
 	// hasmain uint8 // 1 if module contains the main function, 0 otherwise
     uint8_t hasmain;
+#endif
 
 	// gcdatamask, gcbssmask bitvector
     go_bitvector_t gcdatamask;
     go_bitvector_t gcbssmask;
 
+#if defined go1_15_6
 	// typemap map[typeOff]*_type // offset to *_rtype in previous module
     go_hmap_t typemap;
 	// bad bool // module failed to load and should be ignored
     bool bad;
+#endif
 	// next *moduledata
     struct _go_moduledata_t* next;
 } go_moduledata_t;
@@ -285,12 +357,22 @@ typedef struct _go_g_t {
     void* _defer;
 	// m            *m      // current m; offset known to arm liblink
 	void* m;
+#if defined go1_6_4
+	stackAlloc     uintptr // stack allocation is [stack.lo,stack.lo+stackAlloc)
+	void* stackAlloc;
+#endif
     // sched        gobuf
     go_gobuf_t sched;
 	// syscallsp    uintptr        // if status==Gsyscall, syscallsp = sched.sp to use during gc
 	void* syscallsp;
     // syscallpc    uintptr        // if status==Gsyscall, syscallpc = sched.pc to use during gc
 	void* syscallpc;
+#if defined go1_6_4
+	// stkbar         []stkbar       // stack barriers, from low to high (see top of mstkbar.go)
+	go_slice_t stkbar;
+	// stkbarPos      uintptr        // index of lowest stack barrier not hit
+	void* stkbarPos
+#endif
     // stktopsp     uintptr        // expected sp at top of stack, to check in traceback
 	void* stktopsp;
     // param        unsafe.Pointer // passed parameter on wakeup
@@ -301,15 +383,22 @@ typedef struct _go_g_t {
 	uint32_t stackLock;
     // goid         int64
 	int64_t goid;
+#if defined go1_15_6
     // schedlink    guintptr
     void* schedlink;
+#endif
 	// waitsince    int64      // approx time when the g become blocked
     int64_t waitsince;
 	// waitreason   waitReason // if status==Gwaiting
     uint8_t waitreason;
+#if defined go1_6_4
+	// schedlink    guintptr
+    void* schedlink;
+#endif
 
 	// preempt       bool // preemption signal, duplicates stackguard0 = stackpreempt
     bool preempt;
+#if defined go1_15_6
 	// preemptStop   bool // transition to _Gpreempted on preemption; otherwise, just deschedule
     bool preemptStop;
 	// preemptShrink bool // shrink stack at synchronous safe point
@@ -320,13 +409,23 @@ typedef struct _go_g_t {
 	// // without precise pointer information.
 	// asyncSafePoint bool
     bool asyncSafePoint;
+#endif
 
 	// paniconfault bool // panic (instead of crash) on unexpected fault address
     bool paniconfault;
+#if defined go1_6_4
+	// preemptscan    bool   // preempted g does scan for gc
+	bool preemptscan;
+#endif
 	// gcscandone   bool // g has scanned stack; protected by _Gscan bit in status
     bool gcscandone;
+#if defined go1_6_4
+	// gcscanvalid    bool   // false at start of gc cycle, true if G has not run since last scan
+	bool gcscanvalid;
+#endif
 	// throwsplit   bool // must not split stack
     bool throwsplit;
+#if defined go1_15_6
 	// // activeStackChans indicates that there are unlocked channels
 	// // pointing into this goroutine's stack. If true, stack
 	// // copying needs to acquire channel locks to protect these
@@ -338,6 +437,7 @@ typedef struct _go_g_t {
 	// // for stack shrinking. It's a boolean value, but is updated atomically.
 	// parkingOnChan uint8
     uint8_t parkingOnChan;
+#endif
 
 	// raceignore     int8     // ignore race detection events
     int8_t raceignore;
@@ -345,10 +445,16 @@ typedef struct _go_g_t {
     bool sysblocktraced;
 	// sysexitticks   int64    // cputicks when syscall has returned (for tracing)
     int64_t sysexitticks;
+#if defined go1_6_4
+	// sysexitseq     uint64 // trace seq when syscall has returned (for tracing)
+	uint64_t sysexitseq;
+#endif
+#if defined go1_15_6
 	// traceseq       uint64   // trace event sequencer
     uint64_t traceseq;
 	// tracelastp     puintptr // last P emitted an event for this goroutine
     void* tracelastp;
+#endif
 	// lockedm        muintptr
 	void* lockedm;
     // sig            uint32
@@ -363,22 +469,26 @@ typedef struct _go_g_t {
     void* sigpc;
 	// gopc           uintptr         // pc of go statement that created this goroutine
 	void* gopc;
+#if defined go1_15_6
     // ancestors      *[]ancestorInfo // ancestor information goroutine(s) that created this goroutine (only used if debug.tracebackancestors)
 	go_slice_t* ancestors;
+#endif
     // startpc        uintptr         // pc of goroutine function
     void* startpc;
 	// racectx        uintptr
     void* racectx;
 	// waiting        *sudog         // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
 	struct _go_sudog_t* waiting;
+#if defined go1_15_6
     // cgoCtxt        []uintptr      // cgo traceback context
-    go_slice_t cgoCtxt;
+	go_slice_t cgoCtxt;
 	// labels         unsafe.Pointer // profiler labels
     void* labels;
 	// timer          *timer         // cached timer for time.Sleep
     void* timer;
 	// selectDone     uint32         // are we participating in a select and did someone win the race?
     uint32_t selectDone;
+#endif
 
 	// // Per-G GC state
 
@@ -400,6 +510,10 @@ typedef struct _go_sudog_t {
 
 	// g *g
 	go_g_t* g;
+#if defined go1_6_4
+	// selectdone  *uint32
+	uint32_t* selectdone;
+#endif
 
 	// next *sudog
 	struct _go_sudog_t* next;
@@ -417,6 +531,11 @@ typedef struct _go_sudog_t {
 	int64_t acquiretime;
 	// releasetime int64
 	int64_t releasetime;
+#if defined go1_6_4
+	// nrelease    int32  // -1 for acquire
+	int32_t nrelease;
+#endif
+#if defined go1_15_6
 	// ticket      uint32
 	uint32_t ticket;
 
@@ -427,12 +546,15 @@ typedef struct _go_sudog_t {
 
 	// parent   *sudog // semaRoot binary tree
 	struct _go_sudog_t* parent;
+#endif
 	// waitlink *sudog // g.waiting list or semaRoot
 	struct _go_sudog_t* waitlink;
+#if defined go1_15_6
 	// waittail *sudog // semaRoot
 	struct _go_sudog_t* waittail;
 	// c        *hchan // channel
 	struct _go_hchan_t* c;
+#endif
 } go_sudog_t;
 
 typedef struct _go_waitq_t {
@@ -441,8 +563,10 @@ typedef struct _go_waitq_t {
 } go_waitq_t;
 
 typedef struct _go_runtime_mutex_t {
+#if defined go1_15_6
 	int64_t rank;
 	int64_t pad;
+#endif
 	void* key;
 } go_runtime_mutex_t;
 
@@ -479,7 +603,13 @@ typedef struct _go_hchan_t {
 } go_hchan_t;
 
 typedef struct _go_sync_waitgroup_t {
+#if defined go1_6_4
+	uint8_t state1[12];
+	uint32_t sema;
+#endif
+#if defined go1_15_6
 	uint32_t state1[3];
+#endif
 } go_sync_waitgroup_t;
 
 

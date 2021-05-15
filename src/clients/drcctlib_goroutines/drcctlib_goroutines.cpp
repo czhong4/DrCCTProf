@@ -1336,13 +1336,15 @@ ClientInit(int argc, const char *argv[])
     char name[MAXIMUM_FILEPATH] = "";
     DRCCTLIB_INIT_LOG_FILE_NAME(name, "drcctlib_goroutines", "out");
     DRCCTLIB_PRINTF("Creating log file at:%s", name);
-    if (argc > 1) {
+    if (argc == 2) {
         char temp[MAXIMUM_FILEPATH] = "";
         strcpy(temp, name);
         strcpy(name, argv[1]);
         strcat(name, temp);
     }
-
+// #ifdef go1_15_6
+// printf("The version of go is 1.15.6\n");
+// #endif
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
     // print the arguments passed
