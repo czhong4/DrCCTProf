@@ -64,7 +64,7 @@ typedef struct _go_type_t{
 	// _unused    uint8
 	uint8_t _unused;
 #endif
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// tflag      tflag
 	uint8_t tflag;
 #endif
@@ -74,7 +74,7 @@ typedef struct _go_type_t{
 	uint8_t fieldAlign;
 	// kind       uint8
 	uint8_t kind;
-#if defined go1_6_4
+#if defined go1_6_4 || defined go1_11_13
 	// alg        *typeAlg
 	void* alg;
 #endif
@@ -97,7 +97,7 @@ typedef struct _go_type_t{
 	// ptrto   *_type
 	void* ptrto;
 #endif
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// str       nameOff
 	int32_t str;
 	// ptrToThis typeOff
@@ -105,7 +105,7 @@ typedef struct _go_type_t{
 #endif
 } go_type_t;
 
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 typedef struct _go_name_t{
 	// bytes *byte
 	uint8_t* byte;
@@ -115,7 +115,7 @@ typedef struct _go_name_t{
 typedef struct _go_struct_type_t{
 	// rtype
 	go_type_t type;
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// pkgPath name
 	go_name_t pkgPath;
 #endif
@@ -130,7 +130,7 @@ typedef struct _go_struct_field_t{
 	// pkgpath *string
 	void* pkgpath;
 #endif
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// name       name
 	go_name_t name;
 #endif
@@ -142,13 +142,13 @@ typedef struct _go_struct_field_t{
 	// offset  uintptr
 	void* offset;
 #endif
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// offsetAnon uintptr
 	void* offsetAnon;
 #endif
 } go_struct_field_t;
 
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 // ancestorInfo records details of where a goroutine was started.
 typedef struct _go_ancestor_info_t {
 	// pcs  []uintptr // pcs from the stack of this goroutine
@@ -177,7 +177,7 @@ typedef struct _go_hmap_t {
     uint8_t flags; 
 	// B         uint8  // log_2 of # of buckets (can hold up to loadFactor * 2^B items)
     uint8_t B;
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// noverflow uint16 // approximate number of overflow buckets; see incrnoverflow for details
     uint16_t noverflow;
 #endif
@@ -204,7 +204,7 @@ typedef struct _go_hmap_t {
 	// overflow *[2]*[]*bmap
 	void* overflow;
 #endif
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// extra *mapextra // optional fields
     void* extra;
 #endif
@@ -218,6 +218,19 @@ typedef struct _go_sync_mutex_t {
     int32_t state;
     uint32_t sema;
 } go_sync_mutex_t;
+
+typedef struct _go_sync_rwmutex_t {
+	// w           Mutex  // held if there are pending writers
+	go_sync_mutex_t w;
+	// writerSem   uint32 // semaphore for writers to wait for completing readers
+	uint32_t writerSem;
+	// readerSem   uint32 // semaphore for readers to wait for completing writers
+	uint32_t readerSem;
+	// readerCount int32  // number of pending readers
+	int32_t readerCount;
+	// readerWait  int32  // number of departing readers
+	int32_t readerWait;
+} go_sync_rwmutex_t;
 
 typedef struct _go_moduledata_t {
     // pclntable    []byte
@@ -255,13 +268,13 @@ typedef struct _go_moduledata_t {
 	// typelinks []*_type
 	go_slice_t typelinks;
 #endif
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
     // types, etypes         uintptr
     void* types;
     void* etypes;
 #endif
 
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// textsectmap []textsect
     go_slice_t textsectmap;
 	// typelinks   []int32 // offsets from types
@@ -290,7 +303,7 @@ typedef struct _go_moduledata_t {
     go_bitvector_t gcdatamask;
     go_bitvector_t gcbssmask;
 
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// typemap map[typeOff]*_type // offset to *_rtype in previous module
     go_hmap_t typemap;
 	// bad bool // module failed to load and should be ignored
@@ -358,7 +371,7 @@ typedef struct _go_g_t {
 	// m            *m      // current m; offset known to arm liblink
 	void* m;
 #if defined go1_6_4
-	stackAlloc     uintptr // stack allocation is [stack.lo,stack.lo+stackAlloc)
+	// stackAlloc     uintptr // stack allocation is [stack.lo,stack.lo+stackAlloc)
 	void* stackAlloc;
 #endif
     // sched        gobuf
@@ -371,7 +384,7 @@ typedef struct _go_g_t {
 	// stkbar         []stkbar       // stack barriers, from low to high (see top of mstkbar.go)
 	go_slice_t stkbar;
 	// stkbarPos      uintptr        // index of lowest stack barrier not hit
-	void* stkbarPos
+	void* stkbarPos;
 #endif
     // stktopsp     uintptr        // expected sp at top of stack, to check in traceback
 	void* stktopsp;
@@ -383,7 +396,7 @@ typedef struct _go_g_t {
 	uint32_t stackLock;
     // goid         int64
 	int64_t goid;
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
     // schedlink    guintptr
     void* schedlink;
 #endif
@@ -413,13 +426,13 @@ typedef struct _go_g_t {
 
 	// paniconfault bool // panic (instead of crash) on unexpected fault address
     bool paniconfault;
-#if defined go1_6_4
+#if defined go1_6_4 || defined go1_11_13
 	// preemptscan    bool   // preempted g does scan for gc
 	bool preemptscan;
 #endif
 	// gcscandone   bool // g has scanned stack; protected by _Gscan bit in status
     bool gcscandone;
-#if defined go1_6_4
+#if defined go1_6_4 || defined go1_11_13
 	// gcscanvalid    bool   // false at start of gc cycle, true if G has not run since last scan
 	bool gcscanvalid;
 #endif
@@ -449,7 +462,7 @@ typedef struct _go_g_t {
 	// sysexitseq     uint64 // trace seq when syscall has returned (for tracing)
 	uint64_t sysexitseq;
 #endif
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// traceseq       uint64   // trace event sequencer
     uint64_t traceseq;
 	// tracelastp     puintptr // last P emitted an event for this goroutine
@@ -469,7 +482,7 @@ typedef struct _go_g_t {
     void* sigpc;
 	// gopc           uintptr         // pc of go statement that created this goroutine
 	void* gopc;
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
     // ancestors      *[]ancestorInfo // ancestor information goroutine(s) that created this goroutine (only used if debug.tracebackancestors)
 	go_slice_t* ancestors;
 #endif
@@ -479,7 +492,7 @@ typedef struct _go_g_t {
     void* racectx;
 	// waiting        *sudog         // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
 	struct _go_sudog_t* waiting;
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
     // cgoCtxt        []uintptr      // cgo traceback context
 	go_slice_t cgoCtxt;
 	// labels         unsafe.Pointer // profiler labels
@@ -514,6 +527,12 @@ typedef struct _go_sudog_t {
 	// selectdone  *uint32
 	uint32_t* selectdone;
 #endif
+#if defined go1_11_13
+	// isSelect indicates g is participating in a select, so
+	// g.selectDone must be CAS'd to win the wake-up race.
+	// isSelect bool
+	bool isSelect;
+#endif
 
 	// next *sudog
 	struct _go_sudog_t* next;
@@ -526,30 +545,33 @@ typedef struct _go_sudog_t {
 	// For channels, waitlink is only accessed by g.
 	// For semaphores, all fields (including the ones above)
 	// are only accessed when holding a semaRoot lock.
-
+#if defined go1_11_13 || defined go1_15_6
 	// acquiretime int64
 	int64_t acquiretime;
+#endif
 	// releasetime int64
 	int64_t releasetime;
 #if defined go1_6_4
 	// nrelease    int32  // -1 for acquire
 	int32_t nrelease;
 #endif
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// ticket      uint32
 	uint32_t ticket;
-
+#endif
+#if defined go1_15_6
 	// isSelect indicates g is participating in a select, so
 	// g.selectDone must be CAS'd to win the wake-up race.
 	// isSelect bool
 	bool isSelect;
-
+#endif
+#if defined go1_11_13 || defined go1_15_6
 	// parent   *sudog // semaRoot binary tree
 	struct _go_sudog_t* parent;
 #endif
 	// waitlink *sudog // g.waiting list or semaRoot
 	struct _go_sudog_t* waitlink;
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	// waittail *sudog // semaRoot
 	struct _go_sudog_t* waittail;
 	// c        *hchan // channel
@@ -607,7 +629,7 @@ typedef struct _go_sync_waitgroup_t {
 	uint8_t state1[12];
 	uint32_t sema;
 #endif
-#if defined go1_15_6
+#if defined go1_11_13 || defined go1_15_6
 	uint32_t state1[3];
 #endif
 } go_sync_waitgroup_t;
