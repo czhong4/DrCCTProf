@@ -312,10 +312,11 @@ InstrumentAtomicReg(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t 
     dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg,
                            tls_offs + INSTRACE_TLS_OFFS_BUF_PTR, reg_mem_ref_ptr);
 
-    if (strcmp("eax", get_register_name(opnd_get_reg(reg))) == 0 || 
-        strcmp("ebx", get_register_name(opnd_get_reg(reg))) == 0 || 
-        strcmp("ecx", get_register_name(opnd_get_reg(reg))) == 0 || 
-        strcmp("edx", get_register_name(opnd_get_reg(reg))) == 0) {
+    const char* reg_name = get_register_name(opnd_get_reg(reg));
+    if (strcmp("eax", reg_name) == 0 || 
+        strcmp("ebx", reg_name) == 0 || 
+        strcmp("ecx", reg_name) == 0 || 
+        strcmp("edx", reg_name) == 0) {
         
         MINSERT(ilist, where,
                 XINST_CREATE_store(drcontext, 
