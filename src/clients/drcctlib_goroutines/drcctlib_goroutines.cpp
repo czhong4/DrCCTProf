@@ -687,8 +687,8 @@ WrapBeforeRTChansend(void *wrapcxt, void **user_data)
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     int64_t cur_goid = pt->goid_list->back();
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
-    (*chan_op_records)[cur_goid].emplace_back(cur_goid, 1, (app_pc) chan_ptr, cur_context);
-    (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, 1, (app_pc) chan_ptr, cur_context);
+    (*chan_op_records)[cur_goid].emplace_back(cur_goid, SEND, (app_pc) chan_ptr, cur_context);
+    (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, SEND, (app_pc) chan_ptr, cur_context);
     DRCCTLIB_PRINTF("goid(%ld) chansend to channel: %p, context: %d\n", cur_goid, chan_ptr, cur_context);
 }
 
@@ -712,8 +712,8 @@ WrapBeforeRTChanrecv(void *wrapcxt, void **user_data)
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     int64_t cur_goid = pt->goid_list->back();
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
-    (*chan_op_records)[cur_goid].emplace_back(cur_goid, 2, (app_pc) chan_ptr, cur_context);
-    (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, 2, (app_pc) chan_ptr, cur_context);
+    (*chan_op_records)[cur_goid].emplace_back(cur_goid, RECEIVE, (app_pc) chan_ptr, cur_context);
+    (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, RECEIVE, (app_pc) chan_ptr, cur_context);
     DRCCTLIB_PRINTF("goid(%ld) chanrecv from channel: %p, context: %d\n", cur_goid, chan_ptr, cur_context);
 }
 
