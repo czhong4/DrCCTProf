@@ -151,6 +151,11 @@ struct go_context_t {
 };
 
 enum {
+    READ,
+    WRITE
+};
+
+enum {
     LOCK = 1,
     UNLOCK = 0
 };
@@ -206,11 +211,14 @@ CheckCmpxchg(void *drcontext, int64_t cur_goid, context_handle_t cur_ctxt_hndl, 
     app_pc addr = ref->src_addr;
     // DRCCTLIB_PRINTF("addr %p", ref->addr);
     for (size_t i = 0; i < mutex_ctxt_list->size(); i++) {
-        if (addr == (*mutex_ctxt_list)[i].state_addr && cur_goid != (*mutex_ctxt_list)[i].cur_unlock_slow_goid) {
+        if (addr == (*mutex_ctxt_list)[i].state_addr && cur_goid != (*mutex_ctxt_list)[i].cur_unlock_slow_goid &&
+            ref->src_reg1 == 1 && ref->src_reg2 == 0) {
+
             (*lock_records)[cur_goid].emplace_back(LOCK, (*mutex_ctxt_list)[i].create_context);
             context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
             (*test_lock_records)[cur_goid].emplace_back(LOCK, (*mutex_ctxt_list)[i].state_addr, cur_context);
-            DRCCTLIB_PRINTF("GOID(%ld) LOCK %p, context: %d\n", cur_goid, (*mutex_ctxt_list)[i].state_addr, cur_context);
+            DRCCTLIB_PRINTF("GOID(%ld) LOCK %p, context: %d, src_reg1: %lu, src_reg2: %lu\n", 
+                            cur_goid, (*mutex_ctxt_list)[i].state_addr, cur_context, ref->src_reg1, ref->src_reg2);
             break;
         }
     }
@@ -318,10 +326,24 @@ InstrumentAtomicReg(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t 
         strcmp("ecx", reg_name) == 0 || 
         strcmp("edx", reg_name) == 0) {
         
-        MINSERT(ilist, where,
-                XINST_CREATE_store(drcontext, 
-                                   OPND_CREATE_MEMPTR(reg_mem_ref_ptr, offsetof(mem_ref_t, src_reg1)),
-                                   opnd_create_reg(reg_32_to_64(opnd_get_reg(reg)))));
+        if (atomic_type == 2) {
+            MINSERT(ilist, where,
+                    XINST_CREATE_store(drcontext, 
+                                       OPND_CREATE_MEMPTR(reg_mem_ref_ptr, offsetof(mem_ref_t, src_reg1)),
+                                       opnd_create_reg(reg_32_to_64(opnd_get_reg(reg)))));
+        } else {
+            if (num == 0) {
+                MINSERT(ilist, where,
+                        XINST_CREATE_store(drcontext, 
+                                           OPND_CREATE_MEMPTR(reg_mem_ref_ptr, offsetof(mem_ref_t, src_reg1)),
+                                           opnd_create_reg(reg_32_to_64(opnd_get_reg(reg)))));
+            } else {
+                MINSERT(ilist, where,
+                        XINST_CREATE_store(drcontext, 
+                                           OPND_CREATE_MEMPTR(reg_mem_ref_ptr, offsetof(mem_ref_t, src_reg2)),
+                                           opnd_create_reg(reg_32_to_64(opnd_get_reg(reg)))));
+            }
+        }
     }
     if (drreg_unreserve_register(drcontext, ilist, where, reg_mem_ref_ptr) !=
         DRREG_SUCCESS) {
@@ -418,20 +440,20 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
         DRCCTLIB_EXIT_PROCESS(
             "InstrumentInsCallback drreg_reserve_register != DRREG_SUCCESS");
     }
+    int num = 0;
     for (int i = 0; i < instr_num_srcs(instr); i++) {
         if (opnd_is_reg(instr_get_src(instr, i))) {
-            if (atomic_type == 2) {
-                InstrumentAtomicReg(drcontext, bb, instr, instr_get_src(instr, i), 
-                                    reg_temp, i, 1, atomic_type);
-            }
+            InstrumentAtomicReg(drcontext, bb, instr, instr_get_src(instr, i), 
+                                reg_temp, num, 1, atomic_type);
+            num++;
         }
         if (opnd_is_memory_reference(instr_get_src(instr, i))) {
-            InstrumentAtomicMem(drcontext, bb, instr, instr_get_src(instr, i), reg_temp, 0);
+            InstrumentAtomicMem(drcontext, bb, instr, instr_get_src(instr, i), reg_temp, READ);
         }
     }
     for (int i = 0; i < instr_num_dsts(instr); i++) {
         if (opnd_is_memory_reference(instr_get_dst(instr, i))) {
-            InstrumentAtomicMem(drcontext, bb, instr, instr_get_dst(instr, i), reg_temp, 1);
+            InstrumentAtomicMem(drcontext, bb, instr, instr_get_dst(instr, i), reg_temp, WRITE); // may unnecessary
         }
     }
     if (drreg_unreserve_register(drcontext, bb, instr, reg_temp) != DRREG_SUCCESS) {

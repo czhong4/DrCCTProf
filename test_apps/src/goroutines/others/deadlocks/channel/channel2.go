@@ -1,9 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"sync"
 	"time"
-	"fmt"
 )
 
 func main() {
@@ -12,21 +12,20 @@ func main() {
 	var a int
 
 	go func() {
-		//time.Sleep(time.Second)
+		time.Sleep(time.Second)
 		m.Lock()
 		m.Unlock()
-		a = <- ch
+		a = <-ch
 		fmt.Println("finish0")
 	}()
 
 	go func() {
-		time.Sleep(time.Second)
+		// time.Sleep(time.Second)
 		m.Lock()
 		ch <- a
 		m.Unlock()
 		fmt.Println("finish1")
 	}()
 
-	time.Sleep(2*time.Second)
+	time.Sleep(2 * time.Second)
 }
-

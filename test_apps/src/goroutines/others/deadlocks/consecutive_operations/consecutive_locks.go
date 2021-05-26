@@ -1,22 +1,20 @@
 package main
 
 import (
+	"fmt"
 	"sync"
 	"time"
-	"fmt"
 )
 
-var l sync.Mutex
 var a string
 
-func f() {
-	l.Lock()
-	l.Lock()
-	a = "hello, world"
-}
-
 func main() {
-	go f()
+	var l sync.Mutex
+	go func() {
+		l.Lock()
+		l.Lock()
+		a = "hello, world"
+	}()
 	time.Sleep(time.Second)
 	fmt.Println(a)
 }

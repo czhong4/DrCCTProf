@@ -4,17 +4,16 @@ import (
 	"fmt"
 	"sync"
 )
-var l sync.Mutex
+
 var a string
 
-func f() {
-	a = "hello, world"
-	l.Unlock()
-}
-
 func main() {
+	var l sync.Mutex
 	l.Lock()
-	go f()
+	go func() {
+		a = "hello, world"
+		l.Unlock()
+	}()
 	l.Lock()
 	fmt.Println(a)
 }
