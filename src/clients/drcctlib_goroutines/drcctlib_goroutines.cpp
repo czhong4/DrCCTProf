@@ -1544,29 +1544,28 @@ DetectDeadlock()
     vector<double_rlock_t> double_rlock_list;
     //detect double RLock in the same goroutine
     for (auto it = rwlock_records->begin(); it != rwlock_records->end(); it++) {
-        int rlocked = 0;
         list<rwlock_record_t> rlocked_list;
         for (const auto &record : it->second) {
             switch(record.op) {
                 case RLOCK:
-                    if (!rlocked) {
-                        rlocked++;
-                        rlocked_list.push_back(record);
-                    } else {
-                        for (auto it1 = rlocked_list.rbegin(); it1 != rlocked_list.rend(); ++it1) {
-                            if (it1->rwmutex_addr == record.rwmutex_addr) {
-                                double_rlock_list.emplace_back(it->first, it1->rwmutex_addr, 
-                                                               it1->ctxt, record.ctxt);
-                                break;
-                            }
+                    for (auto it1 = rlocked_list.rbegin(); it1 != rlocked_list.rend(); ++it1) {
+                        if (it1->rwmutex_addr == record.rwmutex_addr) {
+                            double_rlock_list.emplace_back(it->first, it1->rwmutex_addr, 
+                                                           it1->ctxt, record.ctxt);
+                            break;
                         }
-                        rlocked++;
-                        rlocked_list.push_back(record);
                     }
+                    rlocked_list.push_back(record);
                     break;
                 case RUNLOCK:
-                    rlocked--;
-                    rlocked_list.remove(record);
+                    auto it1 = rlocked_list.end();
+                    --it1;
+                    for ( ; it1 != rlocked_list.begin(); --it1) {
+                        if (it1->rwmutex_addr == record.rwmutex_addr) {
+                            rlocked_list.erase(it1);
+                            break;
+                        }
+                    }
                     break;
             }
         }
