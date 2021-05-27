@@ -84,6 +84,10 @@ struct lock_record_t {
     context_handle_t ctxt;
 
     lock_record_t(bool o, app_pc addr, context_handle_t c): op(o), mutex_addr(addr), ctxt(c) { }
+
+    bool operator==(const lock_record_t &rhs) const {
+        return op == rhs.op && mutex_addr == rhs.mutex_addr && ctxt == rhs.ctxt;
+    }
 };
 
 struct rwlock_record_t {
@@ -130,6 +134,16 @@ struct blocked_channel_t {
     blocked_channel_t(app_pc addr, context_handle_t c): chan_addr(addr), ctxt(c) { }
 };
 
+struct double_lock_t {
+    int64_t goid;
+    app_pc mutex;
+    context_handle_t ctxt1;
+    context_handle_t ctxt2;
+
+    double_lock_t(int64_t g, app_pc m, context_handle_t c1, context_handle_t c2): 
+                  goid(g), mutex(m), ctxt1(c1), ctxt2(c2) { }
+};
+
 struct double_rlock_t {
     int64_t goid;
     app_pc rwmutex;
@@ -137,7 +151,7 @@ struct double_rlock_t {
     context_handle_t ctxt2;
 
     double_rlock_t(int64_t g, app_pc rw, context_handle_t c1, context_handle_t c2): 
-                  goid(g), rwmutex(rw), ctxt1(c1), ctxt2(c2) { }
+                   goid(g), rwmutex(rw), ctxt1(c1), ctxt2(c2) { }
 };
 
 struct go_context_t {
@@ -1488,7 +1502,7 @@ DetectDeadlock()
         }
     }
 
-    //detect blocked channel
+    // detect blocked channel
     vector<chan_op_record_t> blocked_channel_list;
     for (auto it = op_records_per_chan->begin(); it != op_records_per_chan->end(); ++it) {
         std::queue<chan_op_record_t> sends;
@@ -1527,7 +1541,7 @@ DetectDeadlock()
         }
     }
 
-    //detect blocked wait group
+    // detect blocked wait group
     dr_fprintf(gTraceFile, "Blocked wait groups:\n");
     for (size_t i = 0; i < wg_ctxt_list->size(); i++) {
         if ((*wg_ctxt_list)[i].counter > 0) {
@@ -1540,13 +1554,33 @@ DetectDeadlock()
         }
     }
 
-    struct
+    // double lock
+    vector<double_lock_t> double_lock_list;
+    for (auto it = test_lock_records->begin(); it != test_lock_records->end(); ++it) {
+        list<lock_record_t> locked_list;
+        for (const auto &record : it->second) {
+            if (record.op == LOCK) {
+                for (auto it1 = locked_list.rbegin(); it1 != locked_list.rend(); ++it1) {
+                    if (it1->mutex_addr == record.mutex_addr) {
+                        double_lock_list.emplace_back(it->first, it1->mutex_addr,
+                                                      it1->ctxt, record.ctxt);
+                        break;
+                    }
+                }
+                locked_list.push_back(record);
+            } else {
+                auto temp = lock_record_t(LOCK, record.mutex_addr, record.ctxt);
+                locked_list.remove(temp);
+            }
+        }
+    }
+
+    // detect double RLock in the same goroutine
     vector<double_rlock_t> double_rlock_list;
-    //detect double RLock in the same goroutine
     for (auto it = rwlock_records->begin(); it != rwlock_records->end(); ++it) {
         list<rwlock_record_t> rlocked_list;
         for (const auto &record : it->second) {
-            switch(record.op) {
+            switch (record.op) {
                 case RLOCK:
                     for (auto it1 = rlocked_list.rbegin(); it1 != rlocked_list.rend(); ++it1) {
                         if (it1->rwmutex_addr == record.rwmutex_addr) {
@@ -1583,14 +1617,19 @@ DetectDeadlock()
         }
     }
 
+    if (!double_lock_list.empty()) {
+        dr_fprintf(gTraceFile, "Double lock:\n");
+        for (const auto &double_lock : double_lock_list) {
+            dr_fprintf(gTraceFile, "        goid: %ld\n        mutex: %p\n        lock context1: %d, lock context2: %d\n\n", 
+                       double_lock.goid, double_lock.mutex, double_lock.ctxt1, double_lock.ctxt2);
+        }
+    }
+
     if (!double_rlock_list.empty()) {
         dr_fprintf(gTraceFile, "Double rlock:\n");
         for (const auto &double_rlock : double_rlock_list) {
-            dr_fprintf(gTraceFile, "        goid: %ld\n", double_rlock.goid);
-            dr_fprintf(gTraceFile, "        rwmutex: %p\n", 
-                       double_rlock.rwmutex);
-            dr_fprintf(gTraceFile, "        lock context1: %d, lock context2: %d\n\n", 
-                       double_rlock.ctxt1, double_rlock.ctxt2);
+            dr_fprintf(gTraceFile, "        goid: %ld\n        rwmutex: %p\n        rlock context1: %d, rlock context2: %d\n\n", 
+                       double_rlock.goid, double_rlock.rwmutex, double_rlock.ctxt1, double_rlock.ctxt2);
         }
     }
 
