@@ -144,13 +144,13 @@ struct double_lock_t {
                   goid(g), mutex(m), ctxt1(c1), ctxt2(c2) { }
 };
 
-struct double_rlock_t {
+struct double_rwlock_t {
     int64_t goid;
     app_pc rwmutex;
     context_handle_t ctxt1;
     context_handle_t ctxt2;
 
-    double_rlock_t(int64_t g, app_pc rw, context_handle_t c1, context_handle_t c2): 
+    double_rwlock_t(int64_t g, app_pc rw, context_handle_t c1, context_handle_t c2): 
                    goid(g), rwmutex(rw), ctxt1(c1), ctxt2(c2) { }
 };
 
@@ -1575,13 +1575,14 @@ DetectDeadlock()
         }
     }
 
-    // detect double RLock in the same goroutine
-    vector<double_rlock_t> double_rlock_list;
+    // detect double RLock and double WLock
+    vector<double_rwlock_t> double_rlock_list, double_wlock_list;
     for (auto it = rwlock_records->begin(); it != rwlock_records->end(); ++it) {
-        list<rwlock_record_t> rlocked_list;
+        list<rwlock_record_t> rlocked_list, wlocked_list;
         for (const auto &record : it->second) {
             switch (record.op) {
                 case RLOCK:
+                {
                     for (auto it1 = rlocked_list.rbegin(); it1 != rlocked_list.rend(); ++it1) {
                         if (it1->rwmutex_addr == record.rwmutex_addr) {
                             double_rlock_list.emplace_back(it->first, it1->rwmutex_addr, 
@@ -1591,7 +1592,9 @@ DetectDeadlock()
                     }
                     rlocked_list.push_back(record);
                     break;
+                }
                 case RUNLOCK:
+                {
                     auto it1 = rlocked_list.end();
                     --it1;
                     for ( ; it1 != rlocked_list.begin(); --it1) {
@@ -1601,6 +1604,25 @@ DetectDeadlock()
                         }
                     }
                     break;
+                }
+                case WLOCK:
+                {
+                    for (auto it1 = wlocked_list.rbegin(); it1 != wlocked_list.rend(); ++it1) {
+                        if (it1->rwmutex_addr == record.rwmutex_addr) {
+                            double_wlock_list.emplace_back(it->first, it1->rwmutex_addr,
+                                                           it1->ctxt, record.ctxt);
+                            break;
+                        }
+                    }
+                    wlocked_list.push_back(record);
+                    break;
+                }
+                case WUNLOCK:
+                {
+                    auto temp = rwlock_record_t(LOCK, record.rwmutex_addr, record.ctxt);
+                    wlocked_list.remove(temp);
+                    break;
+                }
             }
         }
     }
@@ -1626,10 +1648,18 @@ DetectDeadlock()
     }
 
     if (!double_rlock_list.empty()) {
-        dr_fprintf(gTraceFile, "Double rlock:\n");
+        dr_fprintf(gTraceFile, "Double Rlock:\n");
         for (const auto &double_rlock : double_rlock_list) {
-            dr_fprintf(gTraceFile, "        goid: %ld\n        rwmutex: %p\n        rlock context1: %d, rlock context2: %d\n\n", 
+            dr_fprintf(gTraceFile, "        goid: %ld\n        rwmutex: %p\n        Rlock context1: %d, Rlock context2: %d\n\n", 
                        double_rlock.goid, double_rlock.rwmutex, double_rlock.ctxt1, double_rlock.ctxt2);
+        }
+    }
+
+    if (!double_wlock_list.empty()) {
+        dr_fprintf(gTraceFile, "Double Wlock:\n");
+        for (const auto &double_wlock : double_wlock_list) {
+            dr_fprintf(gTraceFile, "        goid: %ld\n        rwmutex: %p\n        Wlock context1: %d, Wlock context2: %d\n\n", 
+                       double_wlock.goid, double_wlock.rwmutex, double_wlock.ctxt1, double_wlock.ctxt2);
         }
     }
 
