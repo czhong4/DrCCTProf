@@ -1543,7 +1543,7 @@ DetectDeadlock()
     struct
     vector<double_rlock_t> double_rlock_list;
     //detect double RLock in the same goroutine
-    for (auto it = rwlock_records->begin(); it != rwlock_records->end(); it++) {
+    for (auto it = rwlock_records->begin(); it != rwlock_records->end(); ++it) {
         list<rwlock_record_t> rlocked_list;
         for (const auto &record : it->second) {
             switch(record.op) {
