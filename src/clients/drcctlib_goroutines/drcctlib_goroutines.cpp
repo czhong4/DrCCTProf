@@ -8,7 +8,6 @@
 #include <string>
 #include <string.h>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <queue>
 
@@ -1161,28 +1160,9 @@ FreeBuffer()
 static void
 DetectDeadlock()
 {
-
     vector<vector<deadlock_t>> deadlock_list;
     unordered_set<int64_t> finished_set;
     unordered_map<int64_t, unordered_multimap<app_pc, unordered_set<app_pc>>> lock_sequences;
-    struct lock_pair {
-        app_pc m1;
-        app_pc m2;
-
-        bool operator==(const lock_pair &rhs) const
-        {
-            return m1 == rhs.m1 && m2 == rhs.m2;
-        }
-    };
-    struct hash_func
-    {
-        size_t operator() (const lock_pair &rhs) const
-        {
-            size_t h1 = hash<app_pc>()(rhs.m1);
-            size_t h2 = hash<app_pc>()(rhs.m2);
-            return h1 ^ h2;
-        }
-    };
     unordered_map<lock_pair, unordered_set<int64_t>, hash_func> lock_pair_goid_map;
     // create other mutex lock sequences after a mutex lock
     for (auto it = test_lock_records->begin(); it != test_lock_records->end(); it++) {
@@ -1300,12 +1280,6 @@ DetectDeadlock()
     }
 
     // channel related deadlock
-    struct mutex_before_each_chan {
-        int op;
-        app_pc chan_addr;
-        unordered_set<app_pc> locked_mutex_set;
-        unordered_set<app_pc> unlocked_mutex_set;
-    };
     unordered_map<int64_t, vector<mutex_before_each_chan>> mutex_before_chans;
     vector<vector<chan_deadlock_t>> chan_deadlock_list;
 

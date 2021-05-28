@@ -2,6 +2,7 @@
 #define _DETECTION_H_
 
 #include "drcctlib_defines.h"
+#include <unordered_set>
 
 enum {
     READ,
@@ -136,6 +137,33 @@ struct go_context_t {
 
     go_context_t(unsigned char** c, app_pc canc, context_handle_t cc, bool w): 
                 ctx(c), cancel(canc), create_context(cc), with_cancel(w) { }
+};
+
+struct mutex_before_each_chan {
+    int op;
+    app_pc chan_addr;
+    std::unordered_set<app_pc> locked_mutex_set;
+    std::unordered_set<app_pc> unlocked_mutex_set;
+};
+
+struct lock_pair {
+    app_pc m1;
+    app_pc m2;
+
+    bool operator==(const lock_pair &rhs) const
+    {
+        return m1 == rhs.m1 && m2 == rhs.m2;
+    }
+};
+
+struct hash_func
+{
+    size_t operator() (const lock_pair &rhs) const
+    {
+        size_t h1 = std::hash<app_pc>()(rhs.m1);
+        size_t h2 = std::hash<app_pc>()(rhs.m2);
+        return h1 ^ h2;
+    }
 };
 
 #endif
