@@ -8,6 +8,7 @@
 #include <string>
 #include <string.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <queue>
 
@@ -82,6 +83,7 @@ static unordered_map<app_pc, vector<chan_op_record_t>> *op_records_per_chan;
 static unordered_map<app_pc, context_handle_t> *chan_map;
 static vector<go_context_t> *go_context_list;
 static bool inWithDeadline = false;
+static uint64_t mutex_num = 0;
 
 // client want to do
 void
@@ -400,7 +402,7 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
     string type_str = cgo_get_type_name_string(go_type_ptr, go_firstmoduledata);
     if (strcmp(type_str.c_str(), "sync.Mutex") == 0) {
         go_sync_mutex_t* ret_ptr = (go_sync_mutex_t*) dgw_get_go_func_retaddr(wrapcxt, 1, 0);
-        mutex_ctxt_t mutex_ctxt = {(app_pc)(&(ret_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
+        mutex_ctxt_t mutex_ctxt = {mutex_num++, (app_pc)(&(ret_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
         DRCCTLIB_PRINTF("mutex_ctxt %p %p %d", ret_ptr, mutex_ctxt.state_addr, mutex_ctxt.create_context);
         mutex_ctxt_list->push_back(mutex_ctxt);
     } else if (strcmp(type_str.c_str(), "sync.RWMutex") == 0) {
@@ -429,7 +431,7 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
                         }
                     }
                     go_sync_mutex_t* mutex_ptr = (go_sync_mutex_t*)((uint64_t)ret_ptr + offset);
-                    mutex_ctxt_t mutex_ctxt = {(app_pc)(&(mutex_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
+                    mutex_ctxt_t mutex_ctxt = {mutex_num++, (app_pc)(&(mutex_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
                     DRCCTLIB_PRINTF("mutex_ctxt %p %p %d", ret_ptr, mutex_ctxt.state_addr, mutex_ctxt.create_context);
                     mutex_ctxt_list->push_back(mutex_ctxt);
                 } else if (strcmp(type_str.c_str(), "sync.RWMutex") == 0) {
@@ -638,9 +640,9 @@ WrapBeforeRTClosechan(void *wrapcxt, void **user_data)
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     int64_t cur_goid = pt->goid_list->back();
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
-    (*chan_op_records)[cur_goid].emplace_back(cur_goid, 0, (app_pc) chan_ptr, cur_context);
-    (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, 0, (app_pc) chan_ptr, cur_context);
-    // DRCCTLIB_PRINTF("Close channel: %p, context: %d\n", chan_ptr, cur_context);
+    (*chan_op_records)[cur_goid].emplace_back(cur_goid, CLOSE, (app_pc) chan_ptr, cur_context);
+    (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, CLOSE, (app_pc) chan_ptr, cur_context);
+    DRCCTLIB_PRINTF("Close channel: %p, context: %d\n", chan_ptr, cur_context);
 }
 
 static void
@@ -1158,7 +1160,7 @@ FreeBuffer()
 }
 
 static void
-DetectDeadlock()
+DetectDeadlock1()
 {
     vector<vector<deadlock_t>> deadlock_list;
     unordered_set<int64_t> finished_set;
@@ -1278,7 +1280,23 @@ DetectDeadlock()
             }
         }
     }
+    
+    if (!deadlock_list.empty()) {
+        dr_fprintf(gTraceFile, "Deadlocks:\n");
+        for (const auto &deadlock_group : deadlock_list) {
+            dr_fprintf(gTraceFile, "deadlock: \n");
+            for (const auto &deadlock : deadlock_group) {
+                dr_fprintf(gTraceFile, "          goid: %ld, mutex: %p, mutex: %p\n", 
+                        deadlock.goid, deadlock.mutex1, deadlock.mutex2);
+            }
+            dr_fprintf(gTraceFile, "\n");
+        }
+    }
+}
 
+static void
+ChannelDeadlock()
+{
     // channel related deadlock
     unordered_map<int64_t, vector<mutex_before_each_chan>> mutex_before_chans;
     vector<vector<chan_deadlock_t>> chan_deadlock_list;
@@ -1342,6 +1360,30 @@ DetectDeadlock()
         }
     }
 
+    // output result
+    if (!chan_deadlock_list.empty()) {
+        dr_fprintf(gTraceFile, "Channel related deadlocks:\n");
+        for (const auto &chan_deadlock_group : chan_deadlock_list) {
+            dr_fprintf(gTraceFile, "deadlock: \n");
+            for (const auto &deadlock : chan_deadlock_group) {
+                dr_fprintf(gTraceFile, "        goid: %ld, chan: %p, mutex: %p\n",
+                        deadlock.goid, deadlock.chan, deadlock.mutex);
+                // drcctlib_print_backtrace_first_item(gTraceFile, (*chan_map)[deadlock.chan], false, true);
+                // for (auto mu : *mutex_ctxt_list) {
+                //     if (mu.state_addr == deadlock.mutex) {
+                //         drcctlib_print_backtrace_first_item(gTraceFile, mu.create_context, false, true);
+                //         drcctlib_print_backtrace(gTraceFile, mu.create_context, true, true, -1);
+                //     }
+                // }
+            }
+            dr_fprintf(gTraceFile, "\n");
+        }
+    }
+}
+
+static void
+BlockedChannel()
+{
     // detect blocked channel
     vector<chan_op_record_t> blocked_channel_list;
     for (auto it = op_records_per_chan->begin(); it != op_records_per_chan->end(); ++it) {
@@ -1381,6 +1423,24 @@ DetectDeadlock()
         }
     }
 
+    // output result
+    if (!blocked_channel_list.empty()) {
+        dr_fprintf(gTraceFile, "Blocked channel:\n");
+        for (const auto &blocked_channel : blocked_channel_list) {
+            if (blocked_channel.op == 1) {
+                dr_fprintf(gTraceFile, "        goid: %ld, channel: %p, context: %d, operation: send to\n", 
+                        blocked_channel.goid, blocked_channel.chan_addr, blocked_channel.ctxt);
+            } else {
+                dr_fprintf(gTraceFile, "        goid: %ld, channel: %p, context: %d, operation: receive from\n", 
+                        blocked_channel.goid, blocked_channel.chan_addr, blocked_channel.ctxt);
+            }
+        }
+    }
+}
+
+static void
+BlockedWaitgroup()
+{
     // detect blocked wait group
     dr_fprintf(gTraceFile, "Blocked wait groups:\n");
     for (size_t i = 0; i < wg_ctxt_list->size(); i++) {
@@ -1393,7 +1453,11 @@ DetectDeadlock()
             }
         }
     }
+}
 
+static void
+DoubleLock()
+{
     // double lock
     vector<double_lock_t> double_lock_list;
     for (auto it = test_lock_records->begin(); it != test_lock_records->end(); ++it) {
@@ -1466,19 +1530,8 @@ DetectDeadlock()
             }
         }
     }
-    
-    if (!deadlock_list.empty()) {
-        dr_fprintf(gTraceFile, "Deadlocks:\n");
-        for (const auto &deadlock_group : deadlock_list) {
-            dr_fprintf(gTraceFile, "deadlock: \n");
-            for (const auto &deadlock : deadlock_group) {
-                dr_fprintf(gTraceFile, "          goid: %ld, mutex: %p, mutex: %p\n", 
-                        deadlock.goid, deadlock.mutex1, deadlock.mutex2);
-            }
-            dr_fprintf(gTraceFile, "\n");
-        }
-    }
 
+    // output result
     if (!double_lock_list.empty()) {
         dr_fprintf(gTraceFile, "Double lock:\n");
         for (const auto &double_lock : double_lock_list) {
@@ -1500,38 +1553,6 @@ DetectDeadlock()
         for (const auto &double_wlock : double_wlock_list) {
             dr_fprintf(gTraceFile, "        goid: %ld\n        rwmutex: %p\n        Wlock context1: %d, Wlock context2: %d\n\n", 
                        double_wlock.goid, double_wlock.rwmutex, double_wlock.ctxt1, double_wlock.ctxt2);
-        }
-    }
-
-    if (!chan_deadlock_list.empty()) {
-        dr_fprintf(gTraceFile, "Channel related deadlocks:\n");
-        for (const auto &chan_deadlock_group : chan_deadlock_list) {
-            dr_fprintf(gTraceFile, "deadlock: \n");
-            for (const auto &deadlock : chan_deadlock_group) {
-                dr_fprintf(gTraceFile, "        goid: %ld, chan: %p, mutex: %p\n",
-                        deadlock.goid, deadlock.chan, deadlock.mutex);
-                // drcctlib_print_backtrace_first_item(gTraceFile, (*chan_map)[deadlock.chan], false, true);
-                // for (auto mu : *mutex_ctxt_list) {
-                //     if (mu.state_addr == deadlock.mutex) {
-                //         drcctlib_print_backtrace_first_item(gTraceFile, mu.create_context, false, true);
-                //         drcctlib_print_backtrace(gTraceFile, mu.create_context, true, true, -1);
-                //     }
-                // }
-            }
-            dr_fprintf(gTraceFile, "\n");
-        }
-    }
-
-    if (!blocked_channel_list.empty()) {
-        dr_fprintf(gTraceFile, "Blocked channel:\n");
-        for (const auto &blocked_channel : blocked_channel_list) {
-            if (blocked_channel.op == 1) {
-                dr_fprintf(gTraceFile, "        goid: %ld, channel: %p, context: %d, operation: send to\n", 
-                        blocked_channel.goid, blocked_channel.chan_addr, blocked_channel.ctxt);
-            } else {
-                dr_fprintf(gTraceFile, "        goid: %ld, channel: %p, context: %d, operation: receive from\n", 
-                        blocked_channel.goid, blocked_channel.chan_addr, blocked_channel.ctxt);
-            }
         }
     }
 }
@@ -1586,7 +1607,11 @@ PorcessEndPrint()
         dr_fprintf(gTraceFile, "\n");
     }
 
-    DetectDeadlock();
+    DetectDeadlock1();
+    ChannelDeadlock();
+    BlockedChannel();
+    BlockedWaitgroup();
+    DoubleLock();
 
     for (auto go_context : *go_context_list) {
         DRCCTLIB_PRINTF("context: %p, cancel function: %p\n", go_context.ctx, go_context.cancel);

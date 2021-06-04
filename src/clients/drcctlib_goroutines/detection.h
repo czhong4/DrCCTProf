@@ -1,8 +1,6 @@
 #ifndef _DETECTION_H_
 #define _DETECTION_H_
 
-#include "drcctlib_defines.h"
-#include <unordered_set>
 
 enum {
     READ,
@@ -22,15 +20,19 @@ enum {
 };
 
 enum {
-    SEND = 1,
-    RECEIVE = 2
+    CLOSE, 
+    SEND,
+    RECEIVE
 };
 
 typedef struct _mutex_ctxt_t {
+    uint64_t num;
     app_pc state_addr;
     context_handle_t create_context;
     app_pc container_addr;
     int64_t cur_unlock_slow_goid;
+    uint64_t indegree;
+    uint64_t outdegree;
 } mutex_ctxt_t;
 
 typedef struct _rwmutex_ctxt_t {
