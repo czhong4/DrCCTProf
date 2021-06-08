@@ -11,6 +11,8 @@
 #include <unordered_set>
 #include <utility>
 #include <queue>
+#include <stack>
+#include <iterator>
 
 #include "dr_api.h"
 #include "drmgr.h"
@@ -77,13 +79,13 @@ static vector<rwmutex_ctxt_t> *rwmutex_ctxt_list;
 static vector<waitgroup_ctxt_t> *wg_ctxt_list;
 static unordered_map<int64_t, vector<pair<bool, context_handle_t>>> *lock_records;
 static unordered_map<int64_t, vector<lock_record_t>> *test_lock_records;
+static unordered_map<app_pc, uint64_t> *mutex_map;
 static unordered_map<int64_t, vector<rwlock_record_t>> *rwlock_records;
 static unordered_map<int64_t, vector<chan_op_record_t>> *chan_op_records;
 static unordered_map<app_pc, vector<chan_op_record_t>> *op_records_per_chan;
 static unordered_map<app_pc, context_handle_t> *chan_map;
 static vector<go_context_t> *go_context_list;
 static bool inWithDeadline = false;
-static uint64_t mutex_num = 0;
 
 // client want to do
 void
@@ -98,6 +100,15 @@ CheckCmpxchg(void *drcontext, int64_t cur_goid, context_handle_t cur_ctxt_hndl, 
             (*lock_records)[cur_goid].emplace_back(LOCK, (*mutex_ctxt_list)[i].create_context);
             context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
             (*test_lock_records)[cur_goid].emplace_back(LOCK, (*mutex_ctxt_list)[i].state_addr, cur_context);
+
+            // deadlock2
+            if ((*mutex_ctxt_list)[i].mode != cur_goid && (*mutex_ctxt_list)[i].mode != 0) {
+                (*mutex_ctxt_list)[i].mode = -1;
+            } else {
+                (*mutex_ctxt_list)[i].mode = cur_goid;
+            }
+            // deadlock2
+
             DRCCTLIB_PRINTF("GOID(%ld) LOCK %p, context: %d, src_reg1: %lu, src_reg2: %lu\n", 
                             cur_goid, (*mutex_ctxt_list)[i].state_addr, cur_context, ref->src_reg1, ref->src_reg2);
             break;
@@ -402,9 +413,10 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
     string type_str = cgo_get_type_name_string(go_type_ptr, go_firstmoduledata);
     if (strcmp(type_str.c_str(), "sync.Mutex") == 0) {
         go_sync_mutex_t* ret_ptr = (go_sync_mutex_t*) dgw_get_go_func_retaddr(wrapcxt, 1, 0);
-        mutex_ctxt_t mutex_ctxt = {mutex_num++, (app_pc)(&(ret_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
+        mutex_ctxt_t mutex_ctxt = {mutex_ctxt_list->size(), (app_pc)(&(ret_ptr->state)), cur_context, (app_pc)(ret_ptr), -1, 0, 0, 0};
         DRCCTLIB_PRINTF("mutex_ctxt %p %p %d", ret_ptr, mutex_ctxt.state_addr, mutex_ctxt.create_context);
         mutex_ctxt_list->push_back(mutex_ctxt);
+        (*mutex_map)[mutex_ctxt.state_addr] = mutex_ctxt_list->size() - 1;
     } else if (strcmp(type_str.c_str(), "sync.RWMutex") == 0) {
         go_sync_rwmutex_t* ret_ptr = (go_sync_rwmutex_t*) dgw_get_go_func_retaddr(wrapcxt, 1, 0);
         rwmutex_ctxt_t rwmutex_ctxt = {(app_pc) ret_ptr, cur_context};
@@ -431,9 +443,10 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
                         }
                     }
                     go_sync_mutex_t* mutex_ptr = (go_sync_mutex_t*)((uint64_t)ret_ptr + offset);
-                    mutex_ctxt_t mutex_ctxt = {mutex_num++, (app_pc)(&(mutex_ptr->state)), cur_context, (app_pc)(ret_ptr), -1};
+                    mutex_ctxt_t mutex_ctxt = {mutex_ctxt_list->size(), (app_pc)(&(mutex_ptr->state)), cur_context, (app_pc)(ret_ptr), -1, 0, 0, 0};
                     DRCCTLIB_PRINTF("mutex_ctxt %p %p %d", ret_ptr, mutex_ctxt.state_addr, mutex_ctxt.create_context);
                     mutex_ctxt_list->push_back(mutex_ctxt);
+                    (*mutex_map)[mutex_ctxt.state_addr] = mutex_ctxt_list->size() - 1;
                 } else if (strcmp(type_str.c_str(), "sync.RWMutex") == 0) {
                     if (!ret_ptr) {
                         ret_ptr = (void*)dgw_get_go_func_retaddr(wrapcxt, 1, 0);
@@ -1136,6 +1149,7 @@ InitBuffer()
     wg_ctxt_list = new vector<waitgroup_ctxt_t>();
     lock_records = new unordered_map<int64_t, vector<pair<bool, context_handle_t>>>();
     test_lock_records = new unordered_map<int64_t, vector<lock_record_t>>();
+    mutex_map = new unordered_map<app_pc, uint64_t>();
     rwlock_records = new unordered_map<int64_t, vector<rwlock_record_t>>();
     chan_op_records = new unordered_map<int64_t, vector<chan_op_record_t>>();
     op_records_per_chan = new unordered_map<app_pc, vector<chan_op_record_t>>();
@@ -1152,6 +1166,7 @@ FreeBuffer()
     delete wg_ctxt_list;
     delete lock_records;
     delete test_lock_records;
+    delete mutex_map;
     delete rwlock_records;
     delete chan_op_records;
     delete op_records_per_chan;
@@ -1160,7 +1175,7 @@ FreeBuffer()
 }
 
 static void
-DetectDeadlock1()
+Deadlock1()
 {
     vector<vector<deadlock_t>> deadlock_list;
     unordered_set<int64_t> finished_set;
@@ -1295,6 +1310,313 @@ DetectDeadlock1()
 }
 
 static void
+ConstructLockDependency(unordered_map<int64_t, unordered_multimap<app_pc, lock_dependency>> &relation)
+{
+    for (auto it = test_lock_records->begin(); it != test_lock_records->end(); it++) {
+        lock_dependency dependency_set;
+        for (const auto &record : it->second) {
+            if (record.op == LOCK) {
+                dependency_set.ctxt = record.ctxt;
+                relation[it->first].emplace(record.mutex_addr, dependency_set);
+                dependency_set.L.insert(record.mutex_addr);
+            } else {
+                dependency_set.L.erase(record.mutex_addr);
+            }
+        }
+    }
+}
+
+static void
+InitClassification(unordered_map<int64_t, unordered_multimap<app_pc, lock_dependency>> &relation, 
+                   vector<vector<uint64_t>> &edges_from_to)
+{
+    ConstructLockDependency(relation);
+
+    edges_from_to.reserve(mutex_ctxt_list->size());
+    for (uint64_t i = 0; i < mutex_ctxt_list->size(); ++i) {
+        edges_from_to.push_back(vector<uint64_t>());
+        edges_from_to[i].reserve(mutex_ctxt_list->size());
+        for (uint64_t j = 0; j < mutex_ctxt_list->size(); ++j) {
+            edges_from_to[i].push_back(0);
+        }
+    }
+
+    for (const auto &goid_relation : relation) {
+        for (const auto &mutex_relation : goid_relation.second) {
+            for (const auto &dependency : mutex_relation.second.L) {
+                uint64_t mutex_from = (*mutex_map)[dependency];
+                uint64_t mutex_to = (*mutex_map)[mutex_relation.first];
+                (*mutex_ctxt_list)[mutex_to].indegree += 1;
+                (*mutex_ctxt_list)[mutex_from].outdegree += 1;
+                edges_from_to[(*mutex_ctxt_list)[mutex_from].num][(*mutex_ctxt_list)[mutex_to].num] += 1;
+            }
+        }
+    }
+}
+
+static void
+LockClassification(vector<vector<uint64_t>> &edges_from_to,
+                   unordered_set<app_pc> &cyclic_set)
+{
+    unordered_set<app_pc> independent_set;
+    unordered_set<app_pc> intermediate_set;
+    unordered_set<app_pc> inner_set;
+    stack<app_pc> s;
+
+    for (const auto &mutex : *mutex_ctxt_list) {
+        if (mutex.indegree == 0 && mutex.outdegree == 0) {
+            independent_set.insert(mutex.state_addr);
+        } else if (mutex.indegree == 0 || mutex.outdegree == 0) {
+            intermediate_set.insert(mutex.state_addr);
+            s.push(mutex.state_addr);
+        }
+    }
+
+    while (!s.empty()) {
+        app_pc top_mutex = s.top();
+        s.pop();
+        if ((*mutex_ctxt_list)[(*mutex_map)[top_mutex]].indegree == 0) {
+            for (auto &other_mutex : *mutex_ctxt_list) {
+                if (other_mutex.state_addr != (*mutex_ctxt_list)[(*mutex_map)[top_mutex]].state_addr) {
+                    uint64_t previous_indegree = other_mutex.indegree;
+                    other_mutex.indegree -= edges_from_to[(*mutex_ctxt_list)[(*mutex_map)[top_mutex]].num][other_mutex.num];
+                    (*mutex_ctxt_list)[(*mutex_map)[top_mutex]].outdegree -= edges_from_to[(*mutex_ctxt_list)[(*mutex_map)[top_mutex]].num][other_mutex.num];
+                    edges_from_to[(*mutex_ctxt_list)[(*mutex_map)[top_mutex]].num][other_mutex.num] = 0;
+                    if (other_mutex.indegree == 0 && previous_indegree != 0) {
+                        s.push(other_mutex.state_addr);
+                        if (intermediate_set.find(other_mutex.state_addr) == intermediate_set.end()) {
+                            inner_set.insert(other_mutex.state_addr);
+                        }
+                    }
+                }
+            }
+        }
+        if ((*mutex_ctxt_list)[(*mutex_map)[top_mutex]].outdegree == 0) {
+            for (auto &other_mutex : *mutex_ctxt_list) {
+                if (other_mutex.state_addr != (*mutex_ctxt_list)[(*mutex_map)[top_mutex]].state_addr) {
+                    uint64_t previous_outdegree = other_mutex.outdegree;
+                    other_mutex.outdegree -= edges_from_to[other_mutex.num][(*mutex_ctxt_list)[(*mutex_map)[top_mutex]].num];
+                    (*mutex_ctxt_list)[(*mutex_map)[top_mutex]].indegree -= edges_from_to[other_mutex.num][(*mutex_ctxt_list)[(*mutex_map)[top_mutex]].num];
+                    edges_from_to[other_mutex.num][(*mutex_ctxt_list)[(*mutex_map)[top_mutex]].num] = 0;
+                    if (other_mutex.outdegree == 0 && previous_outdegree != 0) {
+                        s.push(other_mutex.state_addr);
+                        if (intermediate_set.find(other_mutex.state_addr) == intermediate_set.end()) {
+                            inner_set.insert(other_mutex.state_addr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (auto &mutex : *mutex_ctxt_list) {
+        if (independent_set.find(mutex.state_addr) == independent_set.end() &&
+            intermediate_set.find(mutex.state_addr) == intermediate_set.end() &&
+            inner_set.find(mutex.state_addr) == inner_set.end()) {
+            
+            cyclic_set.insert(mutex.state_addr);
+        }
+    }
+}
+
+static void
+LockReduction(unordered_map<int64_t, unordered_multimap<app_pc, lock_dependency>> &relation,
+              vector<vector<uint64_t>> &edges_from_to,
+              unordered_set<app_pc> &cyclic_set)
+{
+    uint64_t previous_size = cyclic_set.size();
+    for (const auto &mutex : cyclic_set) {
+        uint64_t mutex_index = (*mutex_map)[mutex];
+        if ((*mutex_ctxt_list)[mutex_index].mode != -1) {
+            cyclic_set.erase(mutex);
+            for (auto &other_mutex : cyclic_set) {
+                uint64_t other_mutex_index = (*mutex_map)[other_mutex];
+                if (edges_from_to[(*mutex_ctxt_list)[mutex_index].num][(*mutex_ctxt_list)[other_mutex_index].num] != 0) {
+                    (*mutex_ctxt_list)[other_mutex_index].indegree -= edges_from_to[(*mutex_ctxt_list)[mutex_index].num][(*mutex_ctxt_list)[other_mutex_index].num];
+                    edges_from_to[(*mutex_ctxt_list)[mutex_index].num][(*mutex_ctxt_list)[other_mutex_index].num] = 0;
+                    for (auto &goid_relation : relation) {
+                        if (goid_relation.second.find(other_mutex) != goid_relation.second.end()) {
+                            auto result = goid_relation.second.equal_range(other_mutex);
+                            for (auto it = result.first; it != result.second; ++it) {
+                                it->second.L.erase(mutex);
+                            }
+                        }
+                    }
+                }
+                if (edges_from_to[(*mutex_ctxt_list)[other_mutex_index].num][(*mutex_ctxt_list)[mutex_index].num] != 0) {
+                    (*mutex_ctxt_list)[other_mutex_index].outdegree -= edges_from_to[(*mutex_ctxt_list)[other_mutex_index].num][(*mutex_ctxt_list)[mutex_index].num];
+                    edges_from_to[(*mutex_ctxt_list)[other_mutex_index].num][(*mutex_ctxt_list)[mutex_index].num] = 0;
+                }
+            }
+        }
+    }
+    if (previous_size != cyclic_set.size()) {
+        LockReduction(relation, edges_from_to, cyclic_set);
+    }
+}
+
+static void
+visitEdgesFrom(app_pc mutex, 
+               unordered_set<app_pc> &dc, 
+               unordered_map<app_pc, bool> &visited, 
+               vector<vector<uint64_t>> &edges_from_to)
+{
+    if (!visited[mutex]) {
+        dc.insert(mutex);
+        visited[mutex] = true;
+        for (uint64_t i = 0; i < edges_from_to.size(); ++i) {
+            if ((*mutex_ctxt_list)[i].state_addr == mutex) {
+                for (uint64_t j = 0; j < edges_from_to[0].size(); ++j) {
+                    if (edges_from_to[i][j]) {
+                        visitEdgesFrom((*mutex_ctxt_list)[j].state_addr, dc, visited, edges_from_to);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void
+DisjointComponentsFinder(vector<unordered_set<app_pc>> &dcs, 
+                         unordered_set<app_pc> &cyclic_set, 
+                         vector<vector<uint64_t>> &edges_from_to)
+{
+    unordered_set<app_pc> dc; // current disjoint components
+    unordered_map<app_pc, bool> visited;
+    for (const auto &mutex : cyclic_set) {
+        visited[mutex] = false;
+    }
+
+    for (const auto &mutex : cyclic_set) {
+        if (!visited[mutex]) {
+            visitEdgesFrom(mutex, dc, visited, edges_from_to);
+            dcs.push_back(dc);
+            dc.clear();
+        }
+    }
+}
+
+static bool
+findEquDepGroup(const std::pair<const app_pc, lock_dependency> &mutex_relation,
+                std::unordered_map<int64_t, std::unordered_map<app_pc, lock_dependency>> &dc_relation,
+                const int64_t goid)
+{
+    for (const auto &d : dc_relation[goid]) {
+        if (mutex_relation.first == d.first && 
+            mutex_relation.second.L == d.second.L) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void
+ReportCycles(list<pair<app_pc, lock_dependency>> &s,
+             uint64_t chain_size,
+             unordered_map<app_pc, unordered_set<context_handle_t>> &group,
+             list<pair<app_pc, context_handle_t>> &deadlock_chain)
+{
+    if (s.size() == chain_size) {
+        dr_fprintf(gTraceFile, "deadlock2: \n");
+        for (const auto &mutex_lock : deadlock_chain) {
+            dr_fprintf(gTraceFile, "    mutex: %p, ctxt: %d\n", mutex_lock.first, mutex_lock.second);
+        }
+        return;
+    }
+    
+    list<pair<app_pc, lock_dependency>>::iterator it = s.begin();
+    for (uint64_t i = 0; i < chain_size; ++i) {
+         ++it;
+    }
+    for (auto dependency : group[it->first]) {
+        deadlock_chain.push_back(make_pair(it->first, dependency));
+        ReportCycles(s, chain_size + 1, group, deadlock_chain);
+        deadlock_chain.pop_back();
+    }
+}
+
+static void
+DFS_Traverse(unordered_map<int64_t, unordered_map<app_pc, lock_dependency>> &dc_relation,
+             unordered_map<int64_t, unordered_map<app_pc, lock_dependency>>::iterator it,
+             list<pair<app_pc, lock_dependency>> &s,
+             const pair<const app_pc, lock_dependency> &mutex_relation,
+             unordered_map<int64_t, bool> &isTraversed,
+             unordered_map<app_pc, unordered_set<context_handle_t>> &group)
+{
+    s.push_back(mutex_relation);
+    auto it0 = it;
+    for (++it; it != dc_relation.end(); ++it) {
+        if (!isTraversed[it->first]) {
+            for (const auto &next_mutex_relation : it->second) {
+                if (next_mutex_relation.second.L.find(s.back().first) != next_mutex_relation.second.L.end()) {
+                    if (s.front().second.L.find(next_mutex_relation.first) != s.front().second.L.end()) {
+                        s.push_back(next_mutex_relation);
+                        list<pair<app_pc, context_handle_t>> deadlock_chain;
+                        ReportCycles(s, 0, group, deadlock_chain);
+                        s.pop_back();
+                    } else {
+                        isTraversed[it->first] = true;
+                        DFS_Traverse(dc_relation, it0, s, next_mutex_relation, isTraversed, group); //
+                        isTraversed[it->first] = false;
+                    }
+                }
+            }
+        }
+    }
+    s.pop_back();
+}
+
+static void
+CycleDetection(unordered_map<int64_t, unordered_multimap<app_pc, lock_dependency>> &relation,
+               const unordered_set<app_pc> &dc)
+{
+    unordered_map<int64_t, bool> isTraversed;
+    unordered_map<int64_t, unordered_map<app_pc, lock_dependency>> dc_relation;
+    for (const auto &goid_relation : relation) {
+        isTraversed[goid_relation.first] = false;
+    }
+
+    unordered_map<app_pc, unordered_set<context_handle_t>> group;
+    for (const auto &goid_relation : relation) {
+        for (const auto &mutex_relation : goid_relation.second) {
+            if (dc.find(mutex_relation.first) != dc.end() && !mutex_relation.second.L.empty()) {
+                if (!findEquDepGroup(mutex_relation, dc_relation, goid_relation.first)) {
+                    dc_relation[goid_relation.first].emplace(mutex_relation);
+                }
+                group[mutex_relation.first].insert(mutex_relation.second.ctxt);
+            }
+        }
+    }
+
+    list<pair<app_pc, lock_dependency>> s;
+    for (auto it = dc_relation.begin(); it != dc_relation.end(); ++it) {
+        for (const auto mutex_relation : it->second) {
+            isTraversed[it->first] = true;
+            DFS_Traverse(dc_relation, it, s, mutex_relation, isTraversed, group);
+        }
+    }
+}
+
+static void
+Deadlock2()
+{
+    unordered_map<int64_t, unordered_multimap<app_pc, lock_dependency>> lock_dependency_relation;
+    vector<vector<uint64_t>> edges_from_to;
+    InitClassification(lock_dependency_relation, edges_from_to);
+
+    unordered_set<app_pc> cyclic_set;
+    LockClassification(edges_from_to, cyclic_set);
+    LockReduction(lock_dependency_relation, edges_from_to, cyclic_set);
+
+    vector<unordered_set<app_pc>> dcs; // disjoint components set
+    DisjointComponentsFinder(dcs, cyclic_set, edges_from_to);
+
+    for (const auto &dc : dcs) {
+        CycleDetection(lock_dependency_relation, dc);
+    }
+}
+
+static void
 ChannelDeadlock()
 {
     // channel related deadlock
@@ -1425,7 +1747,7 @@ BlockedChannel()
 
     // output result
     if (!blocked_channel_list.empty()) {
-        dr_fprintf(gTraceFile, "Blocked channel:\n");
+        dr_fprintf(gTraceFile, "\nBlocked channel:\n");
         for (const auto &blocked_channel : blocked_channel_list) {
             if (blocked_channel.op == 1) {
                 dr_fprintf(gTraceFile, "        goid: %ld, channel: %p, context: %d, operation: send to\n", 
@@ -1442,7 +1764,7 @@ static void
 BlockedWaitgroup()
 {
     // detect blocked wait group
-    dr_fprintf(gTraceFile, "Blocked wait groups:\n");
+    dr_fprintf(gTraceFile, "\nBlocked wait groups:\n");
     for (size_t i = 0; i < wg_ctxt_list->size(); i++) {
         if ((*wg_ctxt_list)[i].counter > 0) {
             // dr_fprintf(gTraceFile, "%p is blocked at %d\n", 
@@ -1464,17 +1786,20 @@ DoubleLock()
         list<lock_record_t> locked_list;
         for (const auto &record : it->second) {
             if (record.op == LOCK) {
-                for (auto it1 = locked_list.rbegin(); it1 != locked_list.rend(); ++it1) {
+                for (auto it1 = locked_list.begin(); it1 != locked_list.end(); ++it1) {
                     if (it1->mutex_addr == record.mutex_addr) {
                         double_lock_list.emplace_back(it->first, it1->mutex_addr,
                                                       it1->ctxt, record.ctxt);
                         break;
                     }
                 }
-                locked_list.push_back(record);
+                locked_list.push_front(record);
             } else {
-                auto temp = lock_record_t(LOCK, record.mutex_addr, record.ctxt);
-                locked_list.remove(temp);
+                for (auto it1 = locked_list.begin(); it1 != locked_list.end(); ++it1) {
+                    if (it1->mutex_addr == record.mutex_addr) {
+                        locked_list.erase(it1);
+                    }
+                }
             }
         }
     }
@@ -1487,21 +1812,19 @@ DoubleLock()
             switch (record.op) {
                 case RLOCK:
                 {
-                    for (auto it1 = rlocked_list.rbegin(); it1 != rlocked_list.rend(); ++it1) {
+                    for (auto it1 = rlocked_list.begin(); it1 != rlocked_list.end(); ++it1) {
                         if (it1->rwmutex_addr == record.rwmutex_addr) {
                             double_rlock_list.emplace_back(it->first, it1->rwmutex_addr, 
                                                            it1->ctxt, record.ctxt);
                             break;
                         }
                     }
-                    rlocked_list.push_back(record);
+                    rlocked_list.push_front(record);
                     break;
                 }
                 case RUNLOCK:
                 {
-                    auto it1 = rlocked_list.end();
-                    --it1;
-                    for ( ; it1 != rlocked_list.begin(); --it1) {
+                    for (auto it1 = rlocked_list.begin(); it1 != rlocked_list.end(); ++it1) {
                         if (it1->rwmutex_addr == record.rwmutex_addr) {
                             rlocked_list.erase(it1);
                             break;
@@ -1511,21 +1834,23 @@ DoubleLock()
                 }
                 case WLOCK:
                 {
-                    for (auto it1 = wlocked_list.rbegin(); it1 != wlocked_list.rend(); ++it1) {
+                    for (auto it1 = wlocked_list.begin(); it1 != wlocked_list.end(); ++it1) {
                         if (it1->rwmutex_addr == record.rwmutex_addr) {
                             double_wlock_list.emplace_back(it->first, it1->rwmutex_addr,
                                                            it1->ctxt, record.ctxt);
                             break;
                         }
                     }
-                    wlocked_list.push_back(record);
+                    wlocked_list.push_front(record);
                     break;
                 }
                 case WUNLOCK:
                 {
-                    auto temp = rwlock_record_t(LOCK, record.rwmutex_addr, record.ctxt);
-                    wlocked_list.remove(temp);
-                    break;
+                    for (auto it1 = wlocked_list.begin(); it1 != wlocked_list.end(); ++it1) {
+                        if (it1->rwmutex_addr == record.rwmutex_addr) {
+                            wlocked_list.erase(it1);
+                        }
+                    }
                 }
             }
         }
@@ -1533,7 +1858,7 @@ DoubleLock()
 
     // output result
     if (!double_lock_list.empty()) {
-        dr_fprintf(gTraceFile, "Double lock:\n");
+        dr_fprintf(gTraceFile, "\nDouble lock:\n");
         for (const auto &double_lock : double_lock_list) {
             dr_fprintf(gTraceFile, "        goid: %ld\n        mutex: %p\n        lock context1: %d, lock context2: %d\n\n", 
                        double_lock.goid, double_lock.mutex, double_lock.ctxt1, double_lock.ctxt2);
@@ -1541,7 +1866,7 @@ DoubleLock()
     }
 
     if (!double_rlock_list.empty()) {
-        dr_fprintf(gTraceFile, "Double Rlock:\n");
+        dr_fprintf(gTraceFile, "\nDouble Rlock:\n");
         for (const auto &double_rlock : double_rlock_list) {
             dr_fprintf(gTraceFile, "        goid: %ld\n        rwmutex: %p\n        Rlock context1: %d, Rlock context2: %d\n\n", 
                        double_rlock.goid, double_rlock.rwmutex, double_rlock.ctxt1, double_rlock.ctxt2);
@@ -1549,7 +1874,7 @@ DoubleLock()
     }
 
     if (!double_wlock_list.empty()) {
-        dr_fprintf(gTraceFile, "Double Wlock:\n");
+        dr_fprintf(gTraceFile, "\nDouble Wlock:\n");
         for (const auto &double_wlock : double_wlock_list) {
             dr_fprintf(gTraceFile, "        goid: %ld\n        rwmutex: %p\n        Wlock context1: %d, Wlock context2: %d\n\n", 
                        double_wlock.goid, double_wlock.rwmutex, double_wlock.ctxt1, double_wlock.ctxt2);
@@ -1607,7 +1932,8 @@ PorcessEndPrint()
         dr_fprintf(gTraceFile, "\n");
     }
 
-    DetectDeadlock1();
+    Deadlock1();
+    Deadlock2();
     ChannelDeadlock();
     BlockedChannel();
     BlockedWaitgroup();

@@ -33,6 +33,7 @@ typedef struct _mutex_ctxt_t {
     int64_t cur_unlock_slow_goid;
     uint64_t indegree;
     uint64_t outdegree;
+    int64_t mode;
 } mutex_ctxt_t;
 
 typedef struct _rwmutex_ctxt_t {
@@ -156,6 +157,12 @@ struct lock_pair {
     {
         return m1 == rhs.m1 && m2 == rhs.m2;
     }
+};
+
+struct lock_dependency
+{
+    context_handle_t ctxt;
+    std::unordered_set<app_pc> L;
 };
 
 struct hash_func
