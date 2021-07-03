@@ -13,6 +13,11 @@ enum {
 };
 
 enum {
+    DIR,
+    IND
+};
+
+enum {
     RLOCK,
     RUNLOCK,
     WLOCK,
@@ -26,6 +31,7 @@ enum {
 };
 
 typedef struct _mutex_ctxt_t {
+    int64_t create_goid;
     uint64_t num;
     app_pc state_addr;
     context_handle_t create_context;
@@ -40,6 +46,16 @@ typedef struct _rwmutex_ctxt_t {
     app_pc addr;
     context_handle_t create_context;
 } rwmutex_ctxt_t;
+
+typedef struct _chan_ctxt_t {
+    int block_op;
+    uint64_t block_count;
+    app_pc addr;
+    context_handle_t create_context;
+    context_handle_t block_context;
+    uint64_t size;
+    uint64_t qcount;
+} chan_ctxt_t;
 
 typedef struct _waitgroup_ctxt_t {
     app_pc addr;
@@ -165,6 +181,32 @@ struct lock_dependency
     std::unordered_set<app_pc> L;
 };
 
+struct dep_edge
+{
+    app_pc from;
+    app_pc to;
+
+    dep_edge(app_pc f, app_pc t): from(f), to(t) { }
+
+    bool operator==(const dep_edge &rhs) const
+    {
+        return from == rhs.from && to == rhs.to;
+    }
+};
+
+struct color_vertex
+{
+    bool color;
+    app_pc addr;
+
+    color_vertex(bool c, app_pc a): color(c), addr(a) { }
+
+    bool operator==(const color_vertex &rhs) const
+    {
+        return color == rhs.color && addr == rhs.addr;
+    }
+};
+
 struct hash_func
 {
     size_t operator() (const lock_pair &rhs) const
@@ -172,6 +214,18 @@ struct hash_func
         size_t h1 = std::hash<app_pc>()(rhs.m1);
         size_t h2 = std::hash<app_pc>()(rhs.m2);
         return h1 ^ h2;
+    }
+
+    size_t operator() (const dep_edge &rhs) const
+    {
+        size_t h1 = std::hash<app_pc>()(rhs.from);
+        size_t h2 = std::hash<app_pc>()(rhs.to);
+        return h1 ^ h2;
+    }
+
+    size_t operator() (const color_vertex &rhs) const
+    {
+        return std::hash<bool>()(rhs.color) ^ std::hash<app_pc>()(rhs.addr);
     }
 };
 

@@ -68,6 +68,13 @@ static uint tls_offs;
 #define BUF_PTR(tls_base, type, offs) *(type **)TLS_SLOT(tls_base, offs)
 #define MINSERT instrlist_meta_preinsert
 
+#define deadlock3
+static void OnACQ(int64_t cur_goid, app_pc cur_mutex);
+static void OnREL(int64_t cur_goid, app_pc cur_mutex);
+static void PropagateReach(app_pc dependency, app_pc cur_mutex);
+static void DetectCycles();
+static void OnDestroyLock(app_pc cur_mutex);
+
 static file_t gTraceFile;
 static void *thread_sync_lock;
 
@@ -76,6 +83,7 @@ static go_moduledata_t *go_firstmoduledata;
 
 static vector<mutex_ctxt_t> *mutex_ctxt_list;
 static vector<rwmutex_ctxt_t> *rwmutex_ctxt_list;
+static vector<chan_ctxt_t> *chan_ctxt_list;
 static vector<waitgroup_ctxt_t> *wg_ctxt_list;
 static unordered_map<int64_t, vector<pair<bool, context_handle_t>>> *lock_records;
 static unordered_map<int64_t, vector<lock_record_t>> *test_lock_records;
@@ -86,6 +94,18 @@ static unordered_map<app_pc, vector<chan_op_record_t>> *op_records_per_chan;
 static unordered_map<app_pc, context_handle_t> *chan_map;
 static vector<go_context_t> *go_context_list;
 static bool inWithDeadline = false;
+static bool main_started = false;
+
+static unordered_map<int64_t, unordered_set<app_pc>> *lock_set;
+static unordered_map<dep_edge, unordered_map<int64_t, unordered_set<app_pc>>, hash_func> *edge_to_dep_map;
+static unordered_map<app_pc, unordered_set<color_vertex, hash_func>> *dst_set;
+static unordered_map<app_pc, unordered_set<color_vertex, hash_func>> *src_set;
+static unordered_map<app_pc, unordered_set<color_vertex, hash_func>> *external_dst_set;
+static vector<vector<dep_edge>> *cycle_set;
+static unordered_set<app_pc> *ind_cycle_mutex_set;
+static unordered_map<app_pc, unordered_set<app_pc>> *ind_cycle_dir_src_set;
+static unordered_map<app_pc, unordered_set<int64_t>> *mutex_goid_live_map;
+static unordered_map<int64_t, vector<app_pc>> *goid_mutex_use_map;
 
 // client want to do
 void
@@ -93,24 +113,28 @@ CheckCmpxchg(void *drcontext, int64_t cur_goid, context_handle_t cur_ctxt_hndl, 
 {
     app_pc addr = ref->src_addr;
     // DRCCTLIB_PRINTF("addr %p", ref->addr);
-    for (size_t i = 0; i < mutex_ctxt_list->size(); i++) {
-        if (addr == (*mutex_ctxt_list)[i].state_addr && cur_goid != (*mutex_ctxt_list)[i].cur_unlock_slow_goid &&
+    for (size_t i = mutex_ctxt_list->size(); i > 0; i--) {
+        if (addr == (*mutex_ctxt_list)[i - 1].state_addr && cur_goid != (*mutex_ctxt_list)[i - 1].cur_unlock_slow_goid &&
             ref->src_reg1 == 1 && ref->src_reg2 == 0) {
 
-            (*lock_records)[cur_goid].emplace_back(LOCK, (*mutex_ctxt_list)[i].create_context);
+            (*lock_records)[cur_goid].emplace_back(LOCK, (*mutex_ctxt_list)[i - 1].create_context);
             context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
-            (*test_lock_records)[cur_goid].emplace_back(LOCK, (*mutex_ctxt_list)[i].state_addr, cur_context);
+            (*test_lock_records)[cur_goid].emplace_back(LOCK, (*mutex_ctxt_list)[i - 1].state_addr, cur_context);
 
-            // deadlock2
-            if ((*mutex_ctxt_list)[i].mode != cur_goid && (*mutex_ctxt_list)[i].mode != 0) {
-                (*mutex_ctxt_list)[i].mode = -1;
+#ifdef deadlock2
+            if ((*mutex_ctxt_list)[i - 1].mode != cur_goid && (*mutex_ctxt_list)[i - 1].mode != 0) {
+                (*mutex_ctxt_list)[i - 1].mode = -1;
             } else {
-                (*mutex_ctxt_list)[i].mode = cur_goid;
+                (*mutex_ctxt_list)[i - 1].mode = cur_goid;
             }
-            // deadlock2
+#endif
+
+#ifdef deadlock3
+            OnACQ(cur_goid, (*mutex_ctxt_list)[i - 1].state_addr);
+#endif
 
             DRCCTLIB_PRINTF("GOID(%ld) LOCK %p, context: %d, src_reg1: %lu, src_reg2: %lu\n", 
-                            cur_goid, (*mutex_ctxt_list)[i].state_addr, cur_context, ref->src_reg1, ref->src_reg2);
+                            cur_goid, (*mutex_ctxt_list)[i - 1].state_addr, cur_context, ref->src_reg1, ref->src_reg2);
             break;
         }
     }
@@ -132,11 +156,16 @@ CheckXadd(void *drcontext, int64_t cur_goid, context_handle_t cur_ctxt_hndl, mem
             }
         }
     }
-    for (size_t i = 0; i < mutex_ctxt_list->size(); i++) {
-        if (addr == (*mutex_ctxt_list)[i].state_addr) {
-            (*lock_records)[cur_goid].emplace_back(UNLOCK, (*mutex_ctxt_list)[i].create_context);
-            (*test_lock_records)[cur_goid].emplace_back(UNLOCK, (*mutex_ctxt_list)[i].state_addr, cur_context);
-            DRCCTLIB_PRINTF("GOID(%ld) Unlock %p, context: %d\n", cur_goid, (*mutex_ctxt_list)[i].state_addr, cur_context);
+    for (size_t i = mutex_ctxt_list->size(); i > 0; i--) {
+        if (addr == (*mutex_ctxt_list)[i - 1].state_addr) {
+            (*lock_records)[cur_goid].emplace_back(UNLOCK, (*mutex_ctxt_list)[i - 1].create_context);
+            (*test_lock_records)[cur_goid].emplace_back(UNLOCK, (*mutex_ctxt_list)[i - 1].state_addr, cur_context);
+
+#ifdef deadlock3
+            OnREL(cur_goid, (*mutex_ctxt_list)[i - 1].state_addr);
+#endif
+
+            DRCCTLIB_PRINTF("GOID(%ld) Unlock %p, context: %d\n", cur_goid, (*mutex_ctxt_list)[i - 1].state_addr, cur_context);
             break;
         }
     }
@@ -409,14 +438,23 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
         }
     }
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    int64_t cur_goid = 0;
+    if (!(pt->goid_list->empty())) {
+        cur_goid = pt->goid_list->back();
+    }
     go_type_t* go_type_ptr = (go_type_t*)user_data;
     string type_str = cgo_get_type_name_string(go_type_ptr, go_firstmoduledata);
     if (strcmp(type_str.c_str(), "sync.Mutex") == 0) {
         go_sync_mutex_t* ret_ptr = (go_sync_mutex_t*) dgw_get_go_func_retaddr(wrapcxt, 1, 0);
-        mutex_ctxt_t mutex_ctxt = {mutex_ctxt_list->size(), (app_pc)(&(ret_ptr->state)), cur_context, (app_pc)(ret_ptr), -1, 0, 0, 0};
-        DRCCTLIB_PRINTF("mutex_ctxt %p %p %d", ret_ptr, mutex_ctxt.state_addr, mutex_ctxt.create_context);
-        mutex_ctxt_list->push_back(mutex_ctxt);
-        (*mutex_map)[mutex_ctxt.state_addr] = mutex_ctxt_list->size() - 1;
+        if (main_started) {
+            mutex_ctxt_t mutex_ctxt = {cur_goid, mutex_ctxt_list->size(), (app_pc)(&(ret_ptr->state)), cur_context, (app_pc)(ret_ptr), -1, 0, 0, 0};
+            mutex_ctxt_list->push_back(mutex_ctxt);
+            (*mutex_map)[mutex_ctxt.state_addr] = mutex_ctxt_list->size() - 1;
+            (*mutex_goid_live_map)[mutex_ctxt.state_addr].insert(cur_goid);
+            (*goid_mutex_use_map)[cur_goid].push_back(mutex_ctxt.state_addr);
+            DRCCTLIB_PRINTF("GOID(%ld) mutex_ctxt %p %p %d", cur_goid, ret_ptr, mutex_ctxt.state_addr, mutex_ctxt.create_context);
+        }
     } else if (strcmp(type_str.c_str(), "sync.RWMutex") == 0) {
         go_sync_rwmutex_t* ret_ptr = (go_sync_rwmutex_t*) dgw_get_go_func_retaddr(wrapcxt, 1, 0);
         rwmutex_ctxt_t rwmutex_ctxt = {(app_pc) ret_ptr, cur_context};
@@ -443,10 +481,14 @@ WrapEndRTNewObj(void *wrapcxt, void *user_data)
                         }
                     }
                     go_sync_mutex_t* mutex_ptr = (go_sync_mutex_t*)((uint64_t)ret_ptr + offset);
-                    mutex_ctxt_t mutex_ctxt = {mutex_ctxt_list->size(), (app_pc)(&(mutex_ptr->state)), cur_context, (app_pc)(ret_ptr), -1, 0, 0, 0};
-                    DRCCTLIB_PRINTF("mutex_ctxt %p %p %d", ret_ptr, mutex_ctxt.state_addr, mutex_ctxt.create_context);
-                    mutex_ctxt_list->push_back(mutex_ctxt);
-                    (*mutex_map)[mutex_ctxt.state_addr] = mutex_ctxt_list->size() - 1;
+                    if (main_started) {
+                        mutex_ctxt_t mutex_ctxt = {cur_goid, mutex_ctxt_list->size(), (app_pc)(&(mutex_ptr->state)), cur_context, (app_pc)(ret_ptr), -1, 0, 0, 0};
+                        mutex_ctxt_list->push_back(mutex_ctxt);
+                        (*mutex_map)[mutex_ctxt.state_addr] = mutex_ctxt_list->size() - 1;
+                        (*mutex_goid_live_map)[mutex_ctxt.state_addr].insert(cur_goid);
+                        (*goid_mutex_use_map)[cur_goid].push_back(mutex_ctxt.state_addr);
+                        DRCCTLIB_PRINTF("GOID(%ld) mutex_ctxt %p %p %d", cur_goid, ret_ptr, mutex_ctxt.state_addr, mutex_ctxt.create_context);
+                    }
                 } else if (strcmp(type_str.c_str(), "sync.RWMutex") == 0) {
                     if (!ret_ptr) {
                         ret_ptr = (void*)dgw_get_go_func_retaddr(wrapcxt, 1, 0);
@@ -586,7 +628,9 @@ WrapEndRTMakechan(void *wrapcxt, void *user_data)
     go_hchan_t *chan_ptr = (go_hchan_t*) dgw_get_go_func_retaddr(wrapcxt, 2, 0);
     string chan_type_str = cgo_get_type_name_string((go_type_t*) chan_ptr->elemtype, go_firstmoduledata);
     (*chan_map)[(app_pc)chan_ptr] = cur_context;
-    DRCCTLIB_PRINTF("channel: %p, type: %s, size: %ld\n", chan_ptr, chan_type_str.c_str(), chan_ptr->dataqsiz);
+    chan_ctxt_t chan_ctxt = {-1, 0, (app_pc) chan_ptr, cur_context, -1, chan_ptr->dataqsiz, chan_ptr->qcount};
+    chan_ctxt_list->push_back(chan_ctxt);
+    DRCCTLIB_PRINTF("channel: %p, type: %s, size: %lu, qcount: %lu\n", chan_ptr, chan_type_str.c_str(), chan_ptr->dataqsiz, chan_ptr->qcount);
 }
 
 static void
@@ -605,6 +649,17 @@ WrapBeforeRTChansend(void *wrapcxt, void **user_data)
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
     (*chan_op_records)[cur_goid].emplace_back(cur_goid, SEND, (app_pc) chan_ptr, cur_context);
     (*op_records_per_chan)[(app_pc) chan_ptr].emplace_back(cur_goid, SEND, (app_pc) chan_ptr, cur_context);
+    // for (uint64_t i = 0; i < chan_ctxt_list->size(); ++i) {
+    //     if ((app_pc) chan_ptr == (*chan_ctxt_list)[i].addr) {
+    //         if (chan_ptr->dataqsiz > 0) {
+    //             if (chan_ptr->dataqsiz <= chan_ptr->qcount) {
+    //                 (*chan_ctxt_list)[i].block_context = cur_context;
+    //             } else {
+                    
+    //             }
+    //         }
+    //     }
+    // }
     DRCCTLIB_PRINTF("goid(%ld) chansend to channel: %p, context: %d\n", cur_goid, chan_ptr, cur_context);
 }
 
@@ -876,6 +931,73 @@ WrapEndRTMoreStack2(void *wrapcxt, void *user_data)
     DRCCTLIB_PRINTF("GOID(%ld) runtime more stack2 ends, wrapcxt: %p\n", cur_goid, wrapcxt);
 }
 
+static void
+WrapBeforeGoexit0(void *wrapcxt, void **user_data)
+{
+#ifdef deadlock3
+    go_g_t *g_ptr = (go_g_t*) dgw_get_go_func_arg(wrapcxt, 0);
+    printf("%ld exit\n", g_ptr->goid);
+    for (auto mutex : (*goid_mutex_use_map)[g_ptr->goid]) {
+        (*mutex_goid_live_map)[mutex].erase(g_ptr->goid);
+        if ((*mutex_goid_live_map)[mutex].empty()) {
+            OnDestroyLock(mutex);
+            printf("%p is useless\n", mutex);
+        }
+    }
+#endif
+}
+
+static void
+WrapBeforeNewproc1(void *wrapcxt, void **user_data)
+{
+#ifdef deadlock3
+    void **argp = (void**) dgw_get_go_func_arg(wrapcxt, 1);
+    int32_t arg_bytes = (int32_t) (int64_t) dgw_get_go_func_arg(wrapcxt, 2);
+    int32_t arg_num = arg_bytes / 8;
+    // printf("arg num: %d\n", arg_num);
+    // void **args1 = new void*[arg_num + 1];
+    // args1[0] = (void*) (int64_t) arg_num;
+    // printf("argp: %p\n", arg2);
+    // for (int i = 1; i <= arg_num; ++i) {
+    //     printf("address of arg%d: %p\n", i, *(arg2 + i - 1));
+    //     args1[i] = *(arg2 + i - 1);
+    // }
+
+    void **args = new void*[2];
+    args[0] = (void*) argp;
+    args[1] = (void*) (int64_t) arg_num;
+    *user_data = (void*) args;
+#endif
+}
+
+static void
+WrapEndNewproc1(void *wrapcxt, void *user_data)
+{
+#ifdef deadlock3
+    go_g_t *newg = (go_g_t*) dgw_get_go_func_retaddr(wrapcxt, 5, 0);
+    printf("\ngoroutine %ld is created\n", newg->goid);
+    void **args = (void**) user_data;
+    void **argp = (void**) args[0];
+    int32_t arg_num = (int32_t) (int64_t) args[1];
+    for (int i = 0; i < arg_num; ++i) {
+        for (auto mutex : *mutex_ctxt_list) {
+            if ((void*) mutex.container_addr == *(argp + i)) {
+                (*mutex_goid_live_map)[mutex.state_addr].insert(newg->goid);
+                (*goid_mutex_use_map)[newg->goid].push_back(mutex.state_addr);
+            }
+        }
+        // printf("address of arg%d: %p\n", i, *(argp + i));
+    }
+    delete[] args;
+#endif
+}
+
+static void
+WrapBeforeMain(void *wrapcxt, void **user_data)
+{
+    main_started = true;
+}
+
 static go_moduledata_t*
 GetGoFirstmoduledata(const module_data_t *info)
 {
@@ -1046,6 +1168,19 @@ OnMoudleLoad(void *drcontext, const module_data_t *info,
         drwrap_wrap(func_context_cancelCtx_cancel_entry, WrapBeforeContextCancelCtxCancel, WrapEndContextCancelCtxCancel);
     }
 
+    app_pc func_runtime_goexit0_entry = moudle_get_function_entry(info, "runtime.goexit0", true);
+    if (func_runtime_goexit0_entry != NULL) {
+        drwrap_wrap(func_runtime_goexit0_entry, WrapBeforeGoexit0, NULL);
+    }
+    app_pc func_runtime_newproc1 = moudle_get_function_entry(info, "runtime.newproc1", true);
+    if (func_runtime_newproc1 != NULL) {
+        drwrap_wrap(func_runtime_newproc1, WrapBeforeNewproc1, WrapEndNewproc1);
+    }
+    app_pc func_main_main = moudle_get_function_entry(info, "main.main", true);
+    if (func_main_main != NULL) {
+        drwrap_wrap(func_main_main, WrapBeforeMain, NULL);
+    }
+
     // app_pc func_runtime_more_stack_entry = moudle_get_function_entry(info, "runtime.morestack_noctxt", true);
     // if (func_runtime_more_stack_entry != NULL) {
     //     drwrap_wrap(func_runtime_more_stack_entry, WrapBeforeRTMoreStack, WrapEndRTMoreStack);
@@ -1146,15 +1281,27 @@ InitBuffer()
     blacklist = new std::vector<std::string>();
     mutex_ctxt_list = new vector<mutex_ctxt_t>();
     rwmutex_ctxt_list = new vector<rwmutex_ctxt_t>();
+    chan_ctxt_list = new vector<chan_ctxt_t>();
     wg_ctxt_list = new vector<waitgroup_ctxt_t>();
     lock_records = new unordered_map<int64_t, vector<pair<bool, context_handle_t>>>();
     test_lock_records = new unordered_map<int64_t, vector<lock_record_t>>();
+    lock_set = new unordered_map<int64_t, unordered_set<app_pc>>();
     mutex_map = new unordered_map<app_pc, uint64_t>();
     rwlock_records = new unordered_map<int64_t, vector<rwlock_record_t>>();
     chan_op_records = new unordered_map<int64_t, vector<chan_op_record_t>>();
     op_records_per_chan = new unordered_map<app_pc, vector<chan_op_record_t>>();
     chan_map = new unordered_map<app_pc, context_handle_t>();
     go_context_list = new vector<go_context_t>();
+
+    edge_to_dep_map = new unordered_map<dep_edge, unordered_map<int64_t, unordered_set<app_pc>>, hash_func>();
+    dst_set = new unordered_map<app_pc, unordered_set<color_vertex, hash_func>>();
+    src_set = new unordered_map<app_pc, unordered_set<color_vertex, hash_func>>();
+    external_dst_set = new unordered_map<app_pc, unordered_set<color_vertex, hash_func>>();
+    cycle_set = new vector<vector<dep_edge>>();
+    ind_cycle_mutex_set = new unordered_set<app_pc>();
+    ind_cycle_dir_src_set = new unordered_map<app_pc, unordered_set<app_pc>>();
+    mutex_goid_live_map = new unordered_map<app_pc, unordered_set<int64_t>>();
+    goid_mutex_use_map = new unordered_map<int64_t, vector<app_pc>>();
 }
 
 static void
@@ -1163,15 +1310,27 @@ FreeBuffer()
     delete blacklist;
     delete mutex_ctxt_list;
     delete rwmutex_ctxt_list;
+    delete chan_ctxt_list;
     delete wg_ctxt_list;
     delete lock_records;
     delete test_lock_records;
+    delete lock_set;
     delete mutex_map;
     delete rwlock_records;
     delete chan_op_records;
     delete op_records_per_chan;
     delete chan_map;
     delete go_context_list;
+
+    delete edge_to_dep_map;
+    delete dst_set;
+    delete src_set;
+    delete external_dst_set;
+    delete cycle_set;
+    delete ind_cycle_mutex_set;
+    delete ind_cycle_dir_src_set;
+    delete mutex_goid_live_map;
+    delete goid_mutex_use_map;
 }
 
 static void
@@ -1346,8 +1505,8 @@ InitClassification(unordered_map<int64_t, unordered_multimap<app_pc, lock_depend
             for (const auto &dependency : mutex_relation.second.L) {
                 uint64_t mutex_from = (*mutex_map)[dependency];
                 uint64_t mutex_to = (*mutex_map)[mutex_relation.first];
-                (*mutex_ctxt_list)[mutex_to].indegree += 1;
-                (*mutex_ctxt_list)[mutex_from].outdegree += 1;
+                (*mutex_ctxt_list)[mutex_to].indegree++;
+                (*mutex_ctxt_list)[mutex_from].outdegree++;
                 edges_from_to[(*mutex_ctxt_list)[mutex_from].num][(*mutex_ctxt_list)[mutex_to].num] += 1;
             }
         }
@@ -1614,6 +1773,169 @@ Deadlock2()
     for (const auto &dc : dcs) {
         CycleDetection(lock_dependency_relation, dc);
     }
+}
+
+static bool
+ContainEdge(const unordered_set<color_vertex, hash_func> &vertex_set, bool vertex_color, app_pc another_vertex)
+{
+    if (vertex_set.find({vertex_color, another_vertex}) != vertex_set.end()) {
+        return true;
+    }
+    return false;
+}
+
+static void
+OnACQ(int64_t cur_goid, app_pc cur_mutex)
+{
+    for (auto dependency : (*lock_set)[cur_goid]) {
+        (*edge_to_dep_map)[{dependency, cur_mutex}][cur_goid] = (*lock_set)[cur_goid];
+        (*edge_to_dep_map)[{dependency, cur_mutex}][cur_goid].erase(dependency); // wait for check
+
+        if (!ContainEdge((*dst_set)[dependency], DIR, cur_mutex)) {
+            (*dst_set)[dependency].insert({DIR, cur_mutex});
+            (*src_set)[cur_mutex].insert({DIR, dependency});
+            PropagateReach(dependency, cur_mutex);
+        }
+    }
+    (*lock_set)[cur_goid].insert(cur_mutex);
+}
+
+static void 
+OnREL(int64_t cur_goid, app_pc cur_mutex)
+{
+    (*lock_set)[cur_goid].erase(cur_mutex);
+}
+
+static void
+PropagateReach(app_pc dependency, app_pc cur_mutex)
+{
+    for (auto dep_src : (*src_set)[dependency]) {
+        (*dst_set)[dep_src.addr].insert({IND, cur_mutex});
+        for (auto cur_mutex_dst : (*dst_set)[cur_mutex]) {
+            (*dst_set)[dep_src.addr].insert({IND, cur_mutex_dst.addr});
+        }
+    }
+    for (auto cur_mutex_dst : (*dst_set)[cur_mutex]) {
+        (*src_set)[cur_mutex_dst.addr].insert({IND, dependency});
+        for (auto dep_src : (*src_set)[dependency]) {
+            (*src_set)[cur_mutex_dst.addr].insert({IND, dep_src.addr});
+        }
+    }
+    for (auto cur_mutex_dst : (*dst_set)[cur_mutex]) {
+        (*dst_set)[dependency].insert({IND, cur_mutex_dst.addr});
+    }
+    for (auto dep_src : (*src_set)[dependency]) {
+        (*src_set)[cur_mutex].insert({IND, dep_src.addr});
+    }
+}
+
+static void
+DFS(list<app_pc> &s, app_pc mutex, 
+    unordered_map<app_pc, bool> &visited)
+{
+    s.push_back(mutex);
+    for (auto next_mutex : (*ind_cycle_dir_src_set)[mutex] /*external*/) {
+
+        if (s.front() == next_mutex) {
+            vector<dep_edge> dir_cycle;
+            for (auto it = s.begin(); it != s.end(); ++it) {
+                if (*it == s.back()) {
+                    dir_cycle.push_back({*it, s.front()});
+                } else {
+                    auto it1 = it;
+                    dir_cycle.push_back({*it, *++it1});
+                }
+            }
+            cycle_set->push_back(dir_cycle);
+            s.pop_back();
+            return;
+        } else if (visited[next_mutex] == false) {
+            visited[next_mutex] = true;
+            DFS(s, next_mutex, visited);
+            visited[next_mutex] = false;
+        }
+    }
+    s.pop_back();
+}
+
+static void
+DetectCycles()
+{
+    unordered_map<app_pc, bool> visited;
+    list<app_pc> s;
+    for (auto dsts_per_mutex : *dst_set) {
+        for (auto dst : dsts_per_mutex.second) {
+            if (dst.color == DIR && ContainEdge((*dst_set)[dst.addr], DIR, dsts_per_mutex.first)) {
+                cycle_set->push_back({{dsts_per_mutex.first, dst.addr}, {dst.addr, dsts_per_mutex.first}});
+            }
+            if (dst.color == DIR && ContainEdge((*dst_set)[dst.addr], IND, dsts_per_mutex.first)) {
+                (*ind_cycle_dir_src_set)[dsts_per_mutex.first].insert(dst.addr);
+                ind_cycle_mutex_set->insert(dsts_per_mutex.first);
+            }
+        }
+    }
+
+    for (auto mutex : *ind_cycle_mutex_set) {
+        visited[mutex] = false;
+    }
+    
+    for (auto mutex : *ind_cycle_mutex_set) {
+        visited[mutex] = true;
+        DFS(s, mutex, visited);
+    }
+}
+
+static void 
+OnDestroyLock(app_pc cur_mutex)
+{
+    if ((*src_set)[cur_mutex].size() == 0 && 
+        (*dst_set)[cur_mutex].size() > 0) {
+        for (const auto &dst : (*dst_set)[cur_mutex]) {
+            (*src_set)[dst.addr].erase({DIR, cur_mutex});
+            (*src_set)[dst.addr].erase({IND, cur_mutex});
+            edge_to_dep_map->erase({cur_mutex, dst.addr});
+        }
+    } else if ((*src_set)[cur_mutex].size() > 0 && 
+               (*dst_set)[cur_mutex].size() == 0) {
+        for (const auto &src : (*src_set)[cur_mutex]) {
+            (*dst_set)[src.addr].erase({DIR, cur_mutex});
+            (*dst_set)[src.addr].erase({IND, cur_mutex});
+            edge_to_dep_map->erase({src.addr, cur_mutex});
+        }
+    } else if ((*src_set)[cur_mutex].size() > 0 && 
+               (*dst_set)[cur_mutex].size() > 0) {
+        for (const auto &dst : (*dst_set)[cur_mutex]) {
+            (*src_set)[dst.addr].erase({DIR, cur_mutex});
+            (*src_set)[dst.addr].erase({IND, cur_mutex});
+            if (ContainEdge((*dst_set)[cur_mutex], DIR, dst.addr) &&
+                ContainEdge((*dst_set)[dst.addr], DIR, cur_mutex)) {
+                cycle_set->push_back({{cur_mutex, dst.addr}, {dst.addr, cur_mutex}});
+            }
+            if (ContainEdge((*dst_set)[cur_mutex], DIR, dst.addr) &&
+                ContainEdge((*dst_set)[dst.addr], IND, cur_mutex)) {
+                (*ind_cycle_dir_src_set)[cur_mutex].insert(dst.addr);
+                ind_cycle_mutex_set->insert(cur_mutex);
+            }
+        }
+        for (const auto &src : (*src_set)[cur_mutex]) {
+            (*dst_set)[src.addr].erase({DIR, cur_mutex});
+            (*dst_set)[src.addr].erase({IND, cur_mutex});
+            if (ContainEdge((*src_set)[cur_mutex], DIR, src.addr) &&
+                ContainEdge((*dst_set)[cur_mutex], IND, src.addr)) {
+                (*ind_cycle_dir_src_set)[src.addr].insert(cur_mutex);
+                ind_cycle_mutex_set->insert(src.addr);
+            }
+        }
+
+        for (const auto &dst : (*dst_set)[cur_mutex]) {
+            (*external_dst_set)[cur_mutex].insert({DIR, dst.addr});
+        }
+        for (const auto &src : (*src_set)[cur_mutex]) {
+            (*external_dst_set)[src.addr].insert({DIR, cur_mutex});
+        }
+    }
+    dst_set->erase(cur_mutex);
+    src_set->erase(cur_mutex);
 }
 
 static void
@@ -1932,8 +2254,26 @@ PorcessEndPrint()
         dr_fprintf(gTraceFile, "\n");
     }
 
+#ifdef deadlock1
     Deadlock1();
+#endif
+#ifdef deadlock2
     Deadlock2();
+#endif
+#ifdef deadlock3
+    DetectCycles();
+    if (cycle_set->empty()) {
+        printf("no cycle\n");
+    }
+    int i = 0;
+    for (auto cycle : *cycle_set) {
+        printf("cycle %d: \n", ++i);
+        for (auto edge : cycle) {
+            printf("\t%p, %p\n", edge.from, edge.to);
+        }
+    }
+#endif
+
     ChannelDeadlock();
     BlockedChannel();
     BlockedWaitgroup();
@@ -1957,9 +2297,7 @@ ClientInit(int argc, const char *argv[])
         strcpy(name, argv[1]);
         strcat(name, temp);
     }
-// #ifdef go1_15_6
-// printf("The version of go is 1.15.6\n");
-// #endif
+
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(gTraceFile != INVALID_FILE);
     // print the arguments passed
