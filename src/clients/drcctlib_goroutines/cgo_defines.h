@@ -169,9 +169,39 @@ typedef struct _go_type_t{
 	// ptrToThis typeOff
     int32_t ptrToThis;
 #endif
+
+#if defined go1_16_5
+	// size       uintptr
+	void* size;
+	// ptrdata    uintptr // size of memory prefix holding all pointers
+	void* ptrdata;
+	// hash       uint32
+	uint32_t hash;
+	// tflag      tflag
+	uint8_t tflag;
+	// align      uint8
+	uint8_t align;
+	// fieldAlign uint8
+	uint8_t fieldAlign;
+	// kind       uint8
+	uint8_t kind;
+	// // function for comparing objects of this type
+	// // (ptr to object A, ptr to object B) -> ==?
+	// equal func(unsafe.Pointer, unsafe.Pointer) bool
+	void* equal;
+	// // gcdata stores the GC type data for the garbage collector.
+	// // If the KindGCProg bit is set in kind, gcdata is a GC program.
+	// // Otherwise it is a ptrmask bitmap. See mbitmap.go for details.
+	// gcdata    *byte
+	uint8_t* gcdata;
+	// str       nameOff
+	int32_t str;
+	// ptrToThis typeOff
+    int32_t ptrToThis;
+#endif
 } go_type_t;
 
-#if defined go1_11_13 || defined go1_13_15 || defined go1_15_6
+#if defined go1_11_13 || defined go1_13_15 || defined go1_15_6 || defined go1_16_5
 typedef struct _go_name_t{
 	// bytes *byte
 	uint8_t* byte;
@@ -205,6 +235,15 @@ typedef struct _go_struct_type_t{
 #endif
 
 #if defined go1_15_6
+	// rtype
+	go_type_t type;
+	// pkgPath name
+	go_name_t pkgPath;
+	// fields  []structField // sorted by offset
+	go_slice_t fields;
+#endif
+
+#if defined go1_16_5
 	// rtype
 	go_type_t type;
 	// pkgPath name
@@ -254,9 +293,18 @@ typedef struct _go_struct_field_t{
 	// offsetAnon uintptr
 	void* offsetAnon;
 #endif
+
+#if defined go1_16_5
+	// name       name
+	go_name_t name;
+	// typ        *_type
+	go_type_t* typ;
+	// offsetAnon uintptr
+	void* offsetAnon;
+#endif
 } go_struct_field_t;
 
-#if defined go1_11_13 || defined go1_13_15 || defined go1_15_6
+#if defined go1_11_13 || defined go1_13_15 || defined go1_15_6 || defined go1_16_5
 // ancestorInfo records details of where a goroutine was started.
 typedef struct _go_ancestor_info_t {
 	// pcs  []uintptr // pcs from the stack of this goroutine
@@ -356,6 +404,29 @@ typedef struct _go_hmap_t {
 #endif
 
 #if defined go1_15_6
+    // count     int // # live cells == size of map.  Must be first (used by len() builtin)
+    int64_t count;
+	// flags     uint8
+    uint8_t flags; 
+	// B         uint8  // log_2 of # of buckets (can hold up to loadFactor * 2^B items)
+    uint8_t B;
+	// noverflow uint16 // approximate number of overflow buckets; see incrnoverflow for details
+    uint16_t noverflow;
+	// hash0     uint32 // hash seed
+    uint32_t hash0;
+
+	// buckets    unsafe.Pointer // array of 2^B Buckets. may be nil if count==0.
+    void* buckets;
+	// oldbuckets unsafe.Pointer // previous bucket array of half the size, non-nil only when growing
+    void* oldbuckets;
+	// nevacuate  uintptr        // progress counter for evacuation (buckets less than this have been evacuated)
+    void* nevacuate;
+
+	// extra *mapextra // optional fields
+    void* extra;
+#endif
+
+#if defined go1_16_5
     // count     int // # live cells == size of map.  Must be first (used by len() builtin)
     int64_t count;
 	// flags     uint8
@@ -598,6 +669,85 @@ typedef struct _go_moduledata_t {
 	go_slice_t ftab;
 	// filetab      []uint32
 	go_slice_t filetab;
+    // findfunctab  uintptr
+	void* findfunctab;
+	// minpc, maxpc uintptr
+    void* minpc;
+    void* maxpc;
+
+	// text, etext           uintptr
+    void* text;
+    void* etext;
+	// noptrdata, enoptrdata uintptr
+    void* noptrdata;
+    void* enoptrdata;
+	// data, edata           uintptr
+    void* data;
+    void* edata;
+	// bss, ebss             uintptr
+    void* bss;
+    void* ebss;
+	// noptrbss, enoptrbss   uintptr
+    void* noptrbss;
+    void* enoptrbss;
+	// end, gcdata, gcbss    uintptr
+	void* end;
+    void* gcdata;
+    void* gcbss;
+    // types, etypes         uintptr
+    void* types;
+    void* etypes;
+
+	// textsectmap []textsect
+    go_slice_t textsectmap;
+	// typelinks   []int32 // offsets from types
+    go_slice_t typelinks;
+	// itablinks   []*itab
+    go_slice_t itablinks;
+
+	// ptab []ptabEntry
+    go_slice_t ptab;
+
+	// pluginpath string
+    go_string_t pluginpath;
+	// pkghashes  []modulehash
+    go_slice_t pkghashes;
+
+	// modulename   string
+    go_string_t modulename;
+	// modulehashes []modulehash
+    go_slice_t modulehashes;
+
+	// hasmain uint8 // 1 if module contains the main function, 0 otherwise
+    uint8_t hasmain;
+
+	// gcdatamask, gcbssmask bitvector
+    go_bitvector_t gcdatamask;
+    go_bitvector_t gcbssmask;
+
+	// typemap map[typeOff]*_type // offset to *_rtype in previous module
+    go_hmap_t typemap;
+	// bad bool // module failed to load and should be ignored
+    bool bad;
+	// next *moduledata
+    struct _go_moduledata_t* next;
+#endif
+
+#if defined go1_16_5
+	// pcHeader     *pcHeader
+	void* pcHeader;
+	// funcnametab  []byte
+	go_slice_t funcnametab;
+	// cutab        []uint32
+	go_slice_t cutab;
+	// filetab      []byte
+	go_slice_t filetab;
+	// pctab        []byte
+	go_slice_t pctab;
+    // pclntable    []byte
+	go_slice_t pclntable;
+    // ftab         []functab
+	go_slice_t ftab;
     // findfunctab  uintptr
 	void* findfunctab;
 	// minpc, maxpc uintptr
@@ -1155,6 +1305,135 @@ typedef struct _go_g_t {
 	// gcAssistBytes int64
     int64_t gcAssistBytes;
 #endif
+
+#if defined go1_16_5
+    // // Stack parameters.
+	// // stack describes the actual stack memory: [stack.lo, stack.hi).
+	// // stackguard0 is the stack pointer compared in the Go stack growth prologue.
+	// // It is stack.lo+StackGuard normally, but can be StackPreempt to trigger a preemption.
+	// // stackguard1 is the stack pointer compared in the C stack growth prologue.
+	// // It is stack.lo+StackGuard on g0 and gsignal stacks.
+	// // It is ~0 on other goroutine stacks, to trigger a call to morestackc (and crash).
+	// stack       stack   // offset known to runtime/cgo
+    go_stack_t stack;
+	// stackguard0 uintptr // offset known to liblink
+    void* stackguard0;
+	// stackguard1 uintptr // offset known to liblink
+    void* stackguard1;
+
+	// _panic       *_panic // innermost panic - offset known to liblink
+    void* _panic;
+	// _defer       *_defer // innermost defer
+    void* _defer;
+	// m            *m      // current m; offset known to arm liblink
+	void* m;
+    // sched        gobuf
+    go_gobuf_t sched;
+	// syscallsp    uintptr        // if status==Gsyscall, syscallsp = sched.sp to use during gc
+	void* syscallsp;
+    // syscallpc    uintptr        // if status==Gsyscall, syscallpc = sched.pc to use during gc
+	void* syscallpc;
+    // stktopsp     uintptr        // expected sp at top of stack, to check in traceback
+	void* stktopsp;
+    // param        unsafe.Pointer // passed parameter on wakeup
+	void* param;
+    // atomicstatus uint32
+    uint32_t atomicstatus;
+	// stackLock    uint32 // sigprof/scang lock; TODO: fold in to atomicstatus
+	uint32_t stackLock;
+    // goid         int64
+	int64_t goid;
+    // schedlink    guintptr
+    void* schedlink;
+	// waitsince    int64      // approx time when the g become blocked
+    int64_t waitsince;
+	// waitreason   waitReason // if status==Gwaiting
+    uint8_t waitreason;
+
+	// preempt       bool // preemption signal, duplicates stackguard0 = stackpreempt
+    bool preempt;
+	// preemptStop   bool // transition to _Gpreempted on preemption; otherwise, just deschedule
+    bool preemptStop;
+	// preemptShrink bool // shrink stack at synchronous safe point
+    bool preemptShrink;
+
+	// // asyncSafePoint is set if g is stopped at an asynchronous
+	// // safe point. This means there are frames on the stack
+	// // without precise pointer information.
+	// asyncSafePoint bool
+    bool asyncSafePoint;
+
+	// paniconfault bool // panic (instead of crash) on unexpected fault address
+    bool paniconfault;
+	// gcscandone   bool // g has scanned stack; protected by _Gscan bit in status
+    bool gcscandone;
+	// throwsplit   bool // must not split stack
+    bool throwsplit;
+	// // activeStackChans indicates that there are unlocked channels
+	// // pointing into this goroutine's stack. If true, stack
+	// // copying needs to acquire channel locks to protect these
+	// // areas of the stack.
+	// activeStackChans bool
+    bool activeStackChans;
+	// // parkingOnChan indicates that the goroutine is about to
+	// // park on a chansend or chanrecv. Used to signal an unsafe point
+	// // for stack shrinking. It's a boolean value, but is updated atomically.
+	// parkingOnChan uint8
+    uint8_t parkingOnChan;
+
+	// raceignore     int8     // ignore race detection events
+    int8_t raceignore;
+	// sysblocktraced bool     // StartTrace has emitted EvGoInSyscall about this goroutine
+    bool sysblocktraced;
+	// sysexitticks   int64    // cputicks when syscall has returned (for tracing)
+    int64_t sysexitticks;
+	// traceseq       uint64   // trace event sequencer
+    uint64_t traceseq;
+	// tracelastp     puintptr // last P emitted an event for this goroutine
+    void* tracelastp;
+	// lockedm        muintptr
+	void* lockedm;
+    // sig            uint32
+	uint32_t sig;
+    // writebuf       []byte
+	go_slice_t writebuf;
+    // sigcode0       uintptr
+    void* sigcode0;
+	// sigcode1       uintptr
+    void* sigcode1;
+	// sigpc          uintptr
+    void* sigpc;
+	// gopc           uintptr         // pc of go statement that created this goroutine
+	void* gopc;
+    // ancestors      *[]ancestorInfo // ancestor information goroutine(s) that created this goroutine (only used if debug.tracebackancestors)
+	go_slice_t* ancestors;
+    // startpc        uintptr         // pc of goroutine function
+    void* startpc;
+	// racectx        uintptr
+    void* racectx;
+	// waiting        *sudog         // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
+	struct _go_sudog_t* waiting;
+    // cgoCtxt        []uintptr      // cgo traceback context
+	go_slice_t cgoCtxt;
+	// labels         unsafe.Pointer // profiler labels
+    void* labels;
+	// timer          *timer         // cached timer for time.Sleep
+    void* timer;
+	// selectDone     uint32         // are we participating in a select and did someone win the race?
+    uint32_t selectDone;
+
+	// // Per-G GC state
+
+	// // gcAssistBytes is this G's GC assist credit in terms of
+	// // bytes allocated. If this is positive, then the G has credit
+	// // to allocate gcAssistBytes bytes without assisting. If this
+	// // is negative, then the G must correct this by performing
+	// // scan work. We track this in bytes to make it fast to update
+	// // and check for debt in the malloc hot path. The assist ratio
+	// // determines how this corresponds to scan work debt.
+	// gcAssistBytes int64
+    int64_t gcAssistBytes;
+#endif
 } go_g_t;
 
 typedef struct _go_sudog_t {
@@ -1303,6 +1582,53 @@ typedef struct _go_sudog_t {
 	// c        *hchan // channel
 	struct _go_hchan_t* c;
 #endif
+
+#if defined go1_16_5
+	// The following fields are protected by the hchan.lock of the
+	// channel this sudog is blocking on. shrinkstack depends on
+	// this for sudogs involved in channel ops.
+
+	// g *g
+	go_g_t* g;
+
+	// next *sudog
+	struct _go_sudog_t* next;
+	// prev *sudog
+	struct _go_sudog_t* prev;
+	// elem unsafe.Pointer // data element (may point to stack)
+	void* elem;
+
+	// The following fields are never accessed concurrently.
+	// For channels, waitlink is only accessed by g.
+	// For semaphores, all fields (including the ones above)
+	// are only accessed when holding a semaRoot lock.
+	// acquiretime int64
+	int64_t acquiretime;
+	// releasetime int64
+	int64_t releasetime;
+	// ticket      uint32
+	uint32_t ticket;
+	// isSelect indicates g is participating in a select, so
+	// g.selectDone must be CAS'd to win the wake-up race.
+	// isSelect bool
+	bool isSelect;
+
+	// success indicates whether communication over channel c
+	// succeeded. It is true if the goroutine was awoken because a
+	// value was delivered over channel c, and false if awoken
+	// because c was closed.
+	// success bool
+	bool success;
+
+	// parent   *sudog // semaRoot binary tree
+	struct _go_sudog_t* parent;
+	// waitlink *sudog // g.waiting list or semaRoot
+	struct _go_sudog_t* waitlink;
+	// waittail *sudog // semaRoot
+	struct _go_sudog_t* waittail;
+	// c        *hchan // channel
+	struct _go_hchan_t* c;
+#endif
 } go_sudog_t;
 
 typedef struct _go_waitq_t {
@@ -1324,6 +1650,12 @@ typedef struct _go_runtime_mutex_t {
 #endif
 
 #if defined go1_15_6
+	// int64_t rank;
+	// int64_t pad;
+	void* key;
+#endif
+
+#if defined go1_16_5
 	// int64_t rank;
 	// int64_t pad;
 	void* key;
@@ -1377,6 +1709,10 @@ typedef struct _go_sync_waitgroup_t {
 #endif
 
 #if defined go1_15_6
+	uint32_t state1[3];
+#endif
+
+#if defined go1_16_5
 	uint32_t state1[3];
 #endif
 } go_sync_waitgroup_t;
