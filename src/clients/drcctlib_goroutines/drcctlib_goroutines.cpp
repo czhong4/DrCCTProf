@@ -68,7 +68,7 @@ static uint tls_offs;
 #define BUF_PTR(tls_base, type, offs) *(type **)TLS_SLOT(tls_base, offs)
 #define MINSERT instrlist_meta_preinsert
 
-#define deadlock3
+#define deadlock2
 static void OnACQ(int64_t cur_goid, app_pc cur_mutex);
 static void OnREL(int64_t cur_goid, app_pc cur_mutex);
 static void PropagateReach(app_pc dependency, app_pc cur_mutex);
@@ -398,7 +398,13 @@ WrapBeforeRTExecute(void *wrapcxt, void **user_data)
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     go_g_t* go_g_ptr = (go_g_t*)dgw_get_go_func_arg(wrapcxt, 0);
     context_handle_t cur_context = drcctlib_get_context_handle(drcontext);
+    if (pt->call_rt_exec_list->size() > 0) {
+        pt->call_rt_exec_list->pop_back();
+    }
     pt->call_rt_exec_list->push_back(cur_context);
+    if (pt->goid_list->size() > 0) {
+        pt->goid_list->pop_back();
+    }
     pt->goid_list->push_back(go_g_ptr->goid);
 
     vector<int64_t> ancestors;
@@ -1159,8 +1165,8 @@ OnMoudleLoad(void *drcontext, const module_data_t *info,
     }
     app_pc func_context_withdeadline_entry = moudle_get_function_entry(info, "context.WithDeadline", true);
     if (func_context_withdeadline_entry != NULL) {
-        DRCCTLIB_PRINTF("func_context_withdeadline_entry: %p", func_context_withdeadline_entry);
-        DRCCTLIB_PRINTF("info: %s", info->full_path);
+        // DRCCTLIB_PRINTF("func_context_withdeadline_entry: %p", func_context_withdeadline_entry);
+        // DRCCTLIB_PRINTF("info: %s", info->full_path);
         drwrap_wrap(func_context_withdeadline_entry, WrapBeforeContextWithDeadline, WrapEndContextWithDeadline);
     }
     app_pc func_context_cancelCtx_cancel_entry = moudle_get_function_entry(info, "context.(*cancelCtx).cancel", true);
@@ -1196,6 +1202,7 @@ OnMoudleLoad(void *drcontext, const module_data_t *info,
 static void
 PrintAllRTExec(per_thread_t *pt)
 {
+    printf("go pragram ends\n");
     dr_mutex_lock(thread_sync_lock);
 
     for (uint64_t i = 0; i < pt->goid_list->size(); i++) {
@@ -2361,6 +2368,7 @@ ClientInit(int argc, const char *argv[])
 static void
 ClientExit(void)
 {
+    printf("client exit\n");
     PorcessEndPrint();
     drcctlib_exit();
 
